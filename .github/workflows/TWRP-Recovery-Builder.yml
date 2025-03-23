@@ -43,12 +43,12 @@ on:
         required: true
         default: 'system/bin/qseecomd'
       RECOVERY_TAR:
-        description: 'Release recovery.tar For Samsung devices'
+        description: 'Release Recovery.tar For Samsung devices'
         required: false
         default: false
         type: boolean
       RECOVERY_INSTALLER:
-        description: 'Include recovery installer zip'
+        description: 'Include recovery installer.zip'
         type: boolean
         required: true
         default: true
