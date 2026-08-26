@@ -16,19 +16,19 @@ on:
       DEVICE_TREE:
         description: 'Custom Recovery Tree' 
         required: true
-        default: 'https://github.com/kinguser981/cap_sprout_twrp'
+        default: 'https://github.com/TeamWin/android_device_xiaomi_polaris'
       DEVICE_TREE_BRANCH:
         description: 'Custom Recovery Tree Branch' 
         required: true
-        default: 'android-12.1'
+        default: 'android-9.0'
       DEVICE_PATH:
         description: 'Specify your Device Path' 
         required: true
-        default: 'device/nokia/cap_sprout'
+        default: 'device/xiaomi/polaris'
       DEVICE_NAME:
         description: 'Specify your Device Codename' 
         required: true
-        default: 'cap_sprout'
+        default: 'polaris'
       BUILD_TARGET:
         description: 'Specify your Build Target' 
         required: true
@@ -55,7 +55,7 @@ on:
 jobs:
   build:
     name: Build TWRP by ${{ github.actor }}
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     if: github.event.repository.owner.id == github.event.sender.id
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -63,7 +63,7 @@ jobs:
       contents: write
     steps:
     - name: Check Out
-      uses: actions/checkout@v3
+      uses: actions/checkout@main
       
     - name: Display Inputs
       run: |
@@ -95,11 +95,11 @@ jobs:
         sudo add-apt-repository universe
         sudo apt -y install libncurses5
 
-    - name: Install OpenJDK
-      uses: actions/setup-java@v4
+    - name: Install Temurin
+      uses: actions/setup-java@main
       with:
-        distribution: zulu
-        java-version: 8
+        distribution: temurin
+        java-version: 26
 
     - name: Install Git-Repo
       run: |
@@ -109,7 +109,7 @@ jobs:
         sudo ln -sf ~/bin/repo /usr/bin/repo
 
     - name: Check Manifest Branch
-      uses: haya14busa/action-cond@v1
+      uses: haya14busa/action-cond@master
       id: manifest
       with:
         cond: ${{ github.event.inputs.MANIFEST_BRANCH == 'twrp-11' || github.event.inputs.MANIFEST_BRANCH == 'twrp-12.1'  || github.event.inputs.MANIFEST_BRANCH == 'twrp-14.1' }}
@@ -120,8 +120,8 @@ jobs:
       run: |
         mkdir workspace
         cd workspace
-        git config --global user.name "Samuel Kendall"
-        git config --global user.email "kinguser981@gmail.com"
+        git config --global user.name "d22407"
+        git config --global user.email "nguynlanh63@gmail.com"
         repo init --depth=1 -u ${{ steps.manifest.outputs.value }} -b ${{ github.event.inputs.MANIFEST_BRANCH }}
   
     - name: Repo Sync
@@ -148,12 +148,12 @@ jobs:
         fi
       continue-on-error: true
       
-    - name: Install Python 2
+    - name: Install Python 3
       if: github.event.inputs.MANIFEST_BRANCH != 'twrp-11' && github.event.inputs.MANIFEST_BRANCH != 'twrp-12.1'  && github.event.inputs.MANIFEST_BRANCH != 'twrp-14'
       run: |
-        sudo apt -y install python2
+        sudo apt -y install python3
         cd /usr/bin
-        sudo ln -sf python2 python
+        sudo ln -sf python3 python
 
     - name: Building Image 
       run: |
