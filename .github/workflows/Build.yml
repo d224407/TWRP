@@ -9,7 +9,6 @@ on:
         default: ''
         type: choice
         options:
-        - twrp-14.1
         - twrp-12.1
         - twrp-11
         - twrp-9.0
@@ -234,14 +233,3 @@ jobs:
           Device: [Device Tree/Branch](${{ env.DEVICE_TREE_URL }}/${{ github.eventinputs.DEVICE_TREE_BRANCH }})
           Commit: Most recent [commit](${{ env.DEVICE_TREE_URL }}/commit/${{ env.COMMIT_ID }}) during building.
           MD5 (img): ${{ env.MD5_IMG }}
-          
-    - name: Check Missing Dependencies
-  run: |
-    cd workspace
-    if [ -f out/target/product/${{ github.event.inputs.DEVICE_NAME }}/recovery/root/sbin/recovery ]; then
-      echo "=== Checking recovery binary dependencies ==="
-      readelf -d out/target/product/${{ github.event.inputs.DEVICE_NAME }}/recovery/root/sbin/recovery | grep NEEDED
-    fi
-    echo "=== Checking root files ==="
-    ls -la out/target/product/${{ github.event.inputs.DEVICE_NAME }}/recovery/root/
-  continue-on-error: true
