@@ -99,7 +99,6 @@ jobs:
           libbz2-dev lzma ncftp qemu-user-static libstdc++-10-dev libgflags-dev
         sudo apt -y install libncurses-dev libtinfo-dev
         sudo add-apt-repository universe
-        sudo apt -y install libncurses5
 
     - name: Install Temurin
       uses: actions/setup-java@main
