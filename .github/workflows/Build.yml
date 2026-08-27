@@ -48,7 +48,7 @@ jobs:
   build:
     name: Build TWRP
     timeout-minutes: 360
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     if: github.event.repository.owner.id == github.event.sender.id
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -134,9 +134,7 @@ jobs:
         DEVICE_TREE="${{ github.event.inputs.DEVICE_TREE }}"
         MANIFEST_BRANCH="${{ github.event.inputs.MANIFEST_BRANCH }}"
         
-        echo "Fetching branches from $DEVICE_TREE"
         git ls-remote --heads "$DEVICE_TREE" > /tmp/branches.txt
-        cat /tmp/branches.txt
         
         case "$MANIFEST_BRANCH" in
           "twrp-14.1")
@@ -156,25 +154,19 @@ jobs:
             ;;
         esac
         
-        echo "Checking candidates: $CANDIDATES"
-        
         FOUND_BRANCH=""
         for branch in $CANDIDATES; do
           if grep -q "refs/heads/$branch$" /tmp/branches.txt; then
             FOUND_BRANCH="$branch"
-            echo "Found branch: $branch"
             break
           fi
         done
         
         if [ -z "$FOUND_BRANCH" ]; then
-          echo "No matching branch found, trying to get default branch"
           DEFAULT_BRANCH=$(git ls-remote --symref "$DEVICE_TREE" HEAD | grep -o 'refs/heads/[^ ]*' | sed 's|refs/heads/||' | head -1)
           if [ -n "$DEFAULT_BRANCH" ] && grep -q "refs/heads/$DEFAULT_BRANCH$" /tmp/branches.txt; then
             FOUND_BRANCH="$DEFAULT_BRANCH"
-            echo "Using default branch: $DEFAULT_BRANCH"
           else
-            echo "Using master as fallback"
             FOUND_BRANCH="master"
           fi
         fi
@@ -198,7 +190,6 @@ jobs:
         fi
         
         echo "COMMIT_ID=$(git rev-parse HEAD)" >> $GITHUB_ENV
-        echo "Current branch: $(git branch --show-current)"
 
     - name: Cache CCache
       uses: actions/cache@v3
@@ -268,7 +259,6 @@ jobs:
             echo "DEVICE_MAKEFILE=device_$DEVICE_NAME" >> $GITHUB_ENV
         else
             echo "No recovery makefile found"
-            ls -la $DEVICE_PATH/*.mk 2>/dev/null || echo "No .mk files"
             exit 1
         fi
       
@@ -279,6 +269,15 @@ jobs:
         cd /usr/bin
         sudo ln -sf python3 python
 
+    - name: Clean Build Dependencies
+      run: |
+        cd workspace
+        find . -name "*.d" -type f -delete
+        find . -name "*.o" -type f -delete
+        find out -name "*.d" -type f -delete 2>/dev/null || true
+        rm -rf out/target/common/obj 2>/dev/null || true
+        rm -rf out/host/linux-x86/obj 2>/dev/null || true
+
     - name: Build Image 
       run: |
         cd workspace
@@ -286,15 +285,27 @@ jobs:
         export CCACHE_EXEC=/usr/bin/ccache
         export CCACHE_DIR=$PWD/.ccache
         ccache -M 20G
+        ccache -z
+        
+        export BUILD_NUMBER=$(date +%s)
+        export PLATFORM_VERSION=12
+        export PLATFORM_VERSION_CODENAME=REL
+        export WITH_TWRP_SWIPE=true
         
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
         export TARGET_USES_MKE2FS=true
         export SKIP_ABI_CHECKS=true
         export WITH_TWRP_SWIPE=true
+        
         lunch ${{ env.DEVICE_MAKEFILE }}-eng
         make clean
-        make ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all)
+        make clobber
+        make ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all) || {
+          echo "Build failed, trying without dependency files"
+          find . -name "*.d" -type f -delete
+          make ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all)
+        }
         ccache -s
       
     - name: Set Build Date
@@ -323,7 +334,6 @@ jobs:
             echo "MD5_IMG=$(md5sum out/target/product/$DEVICE_NAME/vendor_boot.img | cut -d ' ' -f 1)" >> $GITHUB_ENV
         else
             echo "No recovery image found"
-            ls -la out/target/product/$DEVICE_NAME/ 2>/dev/null || echo "Directory not found"
             exit 1
         fi
 
