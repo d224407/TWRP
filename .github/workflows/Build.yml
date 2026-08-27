@@ -127,7 +127,20 @@ jobs:
     - name: Repo Sync
       run: |
         cd workspace
-        repo sync -j$(nproc --all) --force-sync
+        # Retry repo sync up to 3 times if it fails
+        for attempt in 1 2 3; do
+          echo "Repo sync attempt $attempt/3..."
+          if repo sync -j$(nproc --all) --force-sync; then
+            echo "Repo sync successful"
+            break
+          else
+            echo "Repo sync failed on attempt $attempt"
+            if [ $attempt -eq 3 ]; then
+              exit 1
+            fi
+            sleep 30
+          fi
+        done
 
     - name: Auto Detect Device Tree Branch
       id: detect
@@ -186,6 +199,31 @@ jobs:
         git checkout "$BRANCH" 2>/dev/null || git checkout master
         
         echo "COMMIT_ID=$(git rev-parse HEAD)" >> $GITHUB_ENV
+
+    - name: Validate Device Tree Dependencies
+      run: |
+        cd workspace/${{ github.event.inputs.DEVICE_PATH }}
+        
+        # Check for dependency files and validate them
+        if [ -f ".dependencies" ]; then
+          echo "Validating .dependencies file..."
+          if ! python3 -m json.tool .dependencies > /dev/null 2>&1; then
+            echo "ERROR: .dependencies file is malformed"
+            echo "File contents:"
+            cat .dependencies
+            exit 1
+          fi
+        fi
+        
+        if [ -f "roomservice.xml" ]; then
+          echo "Validating roomservice.xml..."
+          if ! python3 -c "import xml.etree.ElementTree as ET; ET.parse('roomservice.xml')" 2>/dev/null; then
+            echo "ERROR: roomservice.xml is malformed"
+            exit 1
+          fi
+        fi
+        
+        echo "Device tree dependencies validated successfully"
 
     - name: Create embedded.mk
       run: |
