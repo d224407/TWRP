@@ -48,7 +48,7 @@ jobs:
   build:
     name: Build TWRP
     timeout-minutes: 360
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     if: github.event.repository.owner.id == github.event.sender.id
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -119,60 +119,105 @@ jobs:
         cd workspace
         repo sync -j$(nproc --all) --force-sync
 
+    - name: Cache Device Tree
+      uses: actions/cache@v3
+      with:
+        path: workspace/${{ github.event.inputs.DEVICE_PATH }}
+        key: device-tree-${{ github.event.inputs.DEVICE_NAME }}-${{ github.event.inputs.MANIFEST_BRANCH }}
+        restore-keys: |
+          device-tree-${{ github.event.inputs.DEVICE_NAME }}-
+          device-tree-
+
     - name: Auto Detect Device Tree Branch
       id: detect
       run: |
-        cd workspace
         DEVICE_TREE="${{ github.event.inputs.DEVICE_TREE }}"
         MANIFEST_BRANCH="${{ github.event.inputs.MANIFEST_BRANCH }}"
         
+        echo "Fetching branches from $DEVICE_TREE"
         git ls-remote --heads "$DEVICE_TREE" > /tmp/branches.txt
+        cat /tmp/branches.txt
         
         case "$MANIFEST_BRANCH" in
           "twrp-14.1")
-            CANDIDATES="android-14.0 android-14 twrp-14.1 14.0"
+            CANDIDATES="android-14.0 android-14 twrp-14.1 14.0 master main"
             ;;
           "twrp-12.1")
-            CANDIDATES="android-12.1 android-12.0 android-12 twrp-12.1 12.1"
+            CANDIDATES="android-12.1 android-12.0 android-12 twrp-12.1 12.1 master main"
             ;;
           "twrp-11")
-            CANDIDATES="android-11.0 android-11 twrp-11 11.0"
+            CANDIDATES="android-11.0 android-11 twrp-11 11.0 master main"
             ;;
           "twrp-9.0")
-            CANDIDATES="android-9.0 android-9 twrp-9.0 9.0"
+            CANDIDATES="android-9.0 android-9 twrp-9.0 9.0 master main"
             ;;
           *)
             CANDIDATES="master main"
             ;;
         esac
         
+        echo "Checking candidates: $CANDIDATES"
+        
         FOUND_BRANCH=""
         for branch in $CANDIDATES; do
           if grep -q "refs/heads/$branch$" /tmp/branches.txt; then
             FOUND_BRANCH="$branch"
+            echo "Found branch: $branch"
             break
           fi
         done
         
         if [ -z "$FOUND_BRANCH" ]; then
+          echo "No matching branch found, trying to get default branch"
           DEFAULT_BRANCH=$(git ls-remote --symref "$DEVICE_TREE" HEAD | grep -o 'refs/heads/[^ ]*' | sed 's|refs/heads/||' | head -1)
-          if [ -n "$DEFAULT_BRANCH" ]; then
+          if [ -n "$DEFAULT_BRANCH" ] && grep -q "refs/heads/$DEFAULT_BRANCH$" /tmp/branches.txt; then
             FOUND_BRANCH="$DEFAULT_BRANCH"
+            echo "Using default branch: $DEFAULT_BRANCH"
           else
+            echo "Using master as fallback"
             FOUND_BRANCH="master"
           fi
         fi
         
         echo "USED_BRANCH=$FOUND_BRANCH" >> $GITHUB_ENV
-        echo "Branch detected: $FOUND_BRANCH"
 
     - name: Clone Device Tree
       run: |
         cd workspace
         BRANCH="${{ env.USED_BRANCH }}"
-        git clone --depth=1 "${{ github.event.inputs.DEVICE_TREE }}" -b "$BRANCH" "./${{ github.event.inputs.DEVICE_PATH }}"
-        cd ${{ github.event.inputs.DEVICE_PATH }}
+        DEVICE_PATH="${{ github.event.inputs.DEVICE_PATH }}"
+        
+        if [ -d "$DEVICE_PATH" ] && [ -f "$DEVICE_PATH/BoardConfig.mk" ]; then
+          echo "Device tree already exists, skipping clone"
+          cd $DEVICE_PATH
+        else
+          echo "Cloning with branch: $BRANCH"
+          git clone "${{ github.event.inputs.DEVICE_TREE }}" "./$DEVICE_PATH"
+          cd $DEVICE_PATH
+          git checkout "$BRANCH" 2>/dev/null || git checkout master
+        fi
+        
         echo "COMMIT_ID=$(git rev-parse HEAD)" >> $GITHUB_ENV
+        echo "Current branch: $(git branch --show-current)"
+
+    - name: Cache CCache
+      uses: actions/cache@v3
+      with:
+        path: workspace/.ccache
+        key: ccache-${{ github.event.inputs.DEVICE_NAME }}-${{ github.event.inputs.MANIFEST_BRANCH }}-${{ github.run_id }}
+        restore-keys: |
+          ccache-${{ github.event.inputs.DEVICE_NAME }}-${{ github.event.inputs.MANIFEST_BRANCH }}-
+          ccache-${{ github.event.inputs.DEVICE_NAME }}-
+          ccache-
+
+    - name: Cache Prebuilts
+      uses: actions/cache@v3
+      with:
+        path: workspace/prebuilts
+        key: prebuilts-${{ github.event.inputs.MANIFEST_BRANCH }}-${{ github.run_id }}
+        restore-keys: |
+          prebuilts-${{ github.event.inputs.MANIFEST_BRANCH }}-
+          prebuilts-
 
     - name: Create embedded.mk
       run: |
@@ -223,6 +268,7 @@ jobs:
             echo "DEVICE_MAKEFILE=device_$DEVICE_NAME" >> $GITHUB_ENV
         else
             echo "No recovery makefile found"
+            ls -la $DEVICE_PATH/*.mk 2>/dev/null || echo "No .mk files"
             exit 1
         fi
       
@@ -236,6 +282,11 @@ jobs:
     - name: Build Image 
       run: |
         cd workspace
+        export USE_CCACHE=1
+        export CCACHE_EXEC=/usr/bin/ccache
+        export CCACHE_DIR=$PWD/.ccache
+        ccache -M 20G
+        
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
         export TARGET_USES_MKE2FS=true
@@ -244,6 +295,7 @@ jobs:
         lunch ${{ env.DEVICE_MAKEFILE }}-eng
         make clean
         make ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all)
+        ccache -s
       
     - name: Set Build Date
       run: |
@@ -271,6 +323,7 @@ jobs:
             echo "MD5_IMG=$(md5sum out/target/product/$DEVICE_NAME/vendor_boot.img | cut -d ' ' -f 1)" >> $GITHUB_ENV
         else
             echo "No recovery image found"
+            ls -la out/target/product/$DEVICE_NAME/ 2>/dev/null || echo "Directory not found"
             exit 1
         fi
 
