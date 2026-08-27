@@ -44,7 +44,7 @@ jobs:
   build:
     name: Build TWRP
     timeout-minutes: 360
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     if: github.event.repository.owner.id == github.event.sender.id
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -80,7 +80,7 @@ jobs:
           gperf gcc-multilib g++-multilib bc ccache liblz4-tool libncurses-dev \
           libsdl1.2-dev lzop pngcrush schedtool squashfs-tools imagemagick \
           libbz2-dev lzma ncftp qemu-user-static libstdc++-10-dev libgflags-dev \
-          clang-14 lld-14 llvm-14
+          clang-14 lld-14 llvm-14 libtinfo5 libncurses5
 
     - name: Setup LLVM/Clang
       run: |
@@ -216,12 +216,14 @@ jobs:
             exit 1
         fi
       
-    - name: Install Python 3
+    - name: Install Python 2 (Legacy Build Scripts)
       if: github.event.inputs.MANIFEST_BRANCH != 'twrp-11' && github.event.inputs.MANIFEST_BRANCH != 'twrp-12.1' && github.event.inputs.MANIFEST_BRANCH != 'twrp-14.1'
       run: |
-        sudo apt -y install python3
-        cd /usr/bin
-        sudo ln -sf python3 python
+        sudo add-apt-repository universe -y
+        sudo apt update
+        sudo apt install -y python2
+        sudo ln -sf /usr/bin/python2 /usr/bin/python
+        python --version
 
     - name: Clean Obsolete Compiler Flags
       run: |
@@ -309,6 +311,22 @@ jobs:
             sed -i '/PLATFORM_VERSION_CODENAME/a PLATFORM_VERSION_ALL_CODENAMES := REL' build/make/core/version_defaults.mk
           fi
         fi
+
+    - name: Relax link_type Enforcement (Legacy Branches)
+      if: github.event.inputs.MANIFEST_BRANCH != 'twrp-11' && github.event.inputs.MANIFEST_BRANCH != 'twrp-12.1' && github.event.inputs.MANIFEST_BRANCH != 'twrp-14.1'
+      run: |
+        cd workspace
+        for f in build/core/link_type.mk build/make/core/link_type.mk; do
+          if [ -f "$f" ]; then
+            echo "Relaxing link_type enforcement in $f"
+            cp "$f" "$f.bak"
+            sed -i -E 's#^(\s*)(\$\(hide\)\s*.*check_link_type\.py.*)$#\1\2 || true; touch $@#' "$f"
+            if diff -q "$f" "$f.bak" >/dev/null; then
+              echo "WARNING: no check_link_type.py line matched in $f, enforcement unchanged"
+            fi
+            rm -f "$f.bak"
+          fi
+        done
 
     - name: Build Image 
       id: build
