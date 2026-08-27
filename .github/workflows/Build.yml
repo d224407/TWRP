@@ -4,14 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       MANIFEST_BRANCH:
-        description: 'TWRP Minimal-Manifest Branch'
+        description: 'TWRP Minimal-Manifest Branch (e.g., twrp-12.1, twrp-11, twrp-9.0, twrp-14.1)'
         required: true
         default: 'twrp-12.1'
-        type: choice
-        options:
-        - twrp-12.1
-        - twrp-11
-        - twrp-9.0
+        type: string
       DEVICE_TREE:
         description: 'Custom Recovery Tree' 
         required: true
@@ -112,7 +108,7 @@ jobs:
       uses: haya14busa/action-cond@master
       id: manifest
       with:
-        cond: ${{ github.event.inputs.MANIFEST_BRANCH == 'twrp-11' || github.event.inputs.MANIFEST_BRANCH == 'twrp-12.1' }}
+        cond: ${{ github.event.inputs.MANIFEST_BRANCH == 'twrp-11' || github.event.inputs.MANIFEST_BRANCH == 'twrp-12.1' || github.event.inputs.MANIFEST_BRANCH == 'twrp-14.1' }}
         if_true: https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git
         if_false: https://github.com/minimal-manifest-twrp/platform_manifest_twrp_omni.git
 
@@ -129,63 +125,17 @@ jobs:
         cd workspace
         repo sync -j$(nproc --all) --force-sync
 
-    - name: Auto Detect Device Tree Branch
-      id: detect
-      run: |
-        DEVICE_TREE="${{ github.event.inputs.DEVICE_TREE }}"
-        MANIFEST_BRANCH="${{ github.event.inputs.MANIFEST_BRANCH }}"
-        
-        git ls-remote --heads "$DEVICE_TREE" > /tmp/branches.txt
-        
-        case "$MANIFEST_BRANCH" in
-          "twrp-14.1")
-            CANDIDATES="android-14.0 android-14 twrp-14.1 14.0 master main"
-            ;;
-          "twrp-12.1")
-            CANDIDATES="android-12.1 android-12.0 android-12 twrp-12.1 12.1 master main"
-            ;;
-          "twrp-11")
-            CANDIDATES="android-11.0 android-11 twrp-11 11.0 master main"
-            ;;
-          "twrp-9.0")
-            CANDIDATES="android-9.0 android-9 twrp-9.0 9.0 master main"
-            ;;
-          *)
-            CANDIDATES="master main"
-            ;;
-        esac
-        
-        FOUND_BRANCH=""
-        for branch in $CANDIDATES; do
-          if grep -q "refs/heads/$branch$" /tmp/branches.txt; then
-            FOUND_BRANCH="$branch"
-            break
-          fi
-        done
-        
-        if [ -z "$FOUND_BRANCH" ]; then
-          DEFAULT_BRANCH=$(git ls-remote --symref "$DEVICE_TREE" HEAD | grep -o 'refs/heads/[^ ]*' | sed 's|refs/heads/||' | head -1)
-          if [ -n "$DEFAULT_BRANCH" ] && grep -q "refs/heads/$DEFAULT_BRANCH$" /tmp/branches.txt; then
-            FOUND_BRANCH="$DEFAULT_BRANCH"
-          else
-            FOUND_BRANCH="master"
-          fi
-        fi
-        
-        echo "USED_BRANCH=$FOUND_BRANCH" >> $GITHUB_ENV
-
     - name: Clone Device Tree
       run: |
         cd workspace
-        BRANCH="${{ env.USED_BRANCH }}"
         DEVICE_PATH="${{ github.event.inputs.DEVICE_PATH }}"
         
-        echo "Cloning with branch: $BRANCH"
-        git clone "${{ github.event.inputs.DEVICE_TREE }}" "./$DEVICE_PATH"
+        echo "Cloning device tree..."
+        git clone --depth=1 "${{ github.event.inputs.DEVICE_TREE }}" "./$DEVICE_PATH"
         cd $DEVICE_PATH
-        git checkout "$BRANCH" 2>/dev/null || git checkout master
         
         echo "COMMIT_ID=$(git rev-parse HEAD)" >> $GITHUB_ENV
+        echo "Device tree cloned successfully"
 
     - name: Fix empty dependencies file
       run: |
@@ -194,7 +144,6 @@ jobs:
         
         echo "Checking for empty dependencies files in $DEVICE_PATH"
         
-        # Tìm tất cả file .dependencies và sửa nếu rỗng
         find $DEVICE_PATH -name "*.dependencies" -type f 2>/dev/null | while read file; do
           if [ ! -s "$file" ]; then
             echo "File $file is empty, creating valid JSON"
@@ -202,11 +151,9 @@ jobs:
           fi
         done
         
-        # Nếu không có file nào, tạo mới
         if [ -z "$(find $DEVICE_PATH -name "*.dependencies" -type f 2>/dev/null)" ]; then
           echo "No dependencies file found, creating omni.dependencies"
           echo '[]' > $DEVICE_PATH/omni.dependencies
-          echo "Created $DEVICE_PATH/omni.dependencies"
         fi
 
     - name: Create embedded.mk
@@ -262,7 +209,7 @@ jobs:
         fi
       
     - name: Install Python 3
-      if: github.event.inputs.MANIFEST_BRANCH != 'twrp-11' && github.event.inputs.MANIFEST_BRANCH != 'twrp-12.1'
+      if: github.event.inputs.MANIFEST_BRANCH != 'twrp-11' && github.event.inputs.MANIFEST_BRANCH != 'twrp-12.1' && github.event.inputs.MANIFEST_BRANCH != 'twrp-14.1'
       run: |
         sudo apt -y install python3
         cd /usr/bin
@@ -367,7 +314,6 @@ jobs:
           Device: ${{ github.event.inputs.DEVICE_NAME }}
           Target: ${{ github.event.inputs.BUILD_TARGET }}.img
           Manifest: ${{ github.event.inputs.MANIFEST_BRANCH }}
-          Device Tree Branch: ${{ env.USED_BRANCH }}
           Build Date: ${{ env.BUILD_DATE }}
           Commit: ${{ env.DEVICE_TREE_URL }}/commit/${{ env.COMMIT_ID }}
           MD5: ${{ env.MD5_IMG }}
@@ -385,7 +331,6 @@ jobs:
           Device: ${{ github.event.inputs.DEVICE_NAME }}
           Target: ${{ github.event.inputs.BUILD_TARGET }}.img
           Manifest: ${{ github.event.inputs.MANIFEST_BRANCH }}
-          Device Tree Branch: ${{ env.USED_BRANCH }}
           Build Date: ${{ env.BUILD_DATE }}
           Commit: ${{ env.DEVICE_TREE_URL }}/commit/${{ env.COMMIT_ID }}
           MD5: ${{ env.MD5_IMG }}
