@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       MANIFEST_BRANCH:
-        description: 'TWRP Minimal-Manifest Branch (e.g., twrp-12.1, twrp-11, twrp-9.0, twrp-14.1)'
+        description: 'TWRP Minimal-Manifest Branch (automatic = auto-detect default branch)'
         required: true
-        default: 'twrp-12.1'
+        default: 'automatic'
         type: string
       DEVICE_TREE:
         description: 'Custom Recovery Tree' 
@@ -44,7 +44,7 @@ jobs:
   build:
     name: Build TWRP
     timeout-minutes: 360
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     if: github.event.repository.owner.id == github.event.sender.id
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -89,7 +89,7 @@ jobs:
           gperf gcc-multilib g++-multilib bc ccache liblz4-tool libncurses-dev \
           libsdl1.2-dev lzop pngcrush schedtool squashfs-tools imagemagick \
           libbz2-dev lzma ncftp qemu-user-static libstdc++-10-dev libgflags-dev \
-          clang-14 lld-14 llvm-14 libtinfo5 libncurses5
+          clang-14 lld-14 llvm-14
 
     - name: Setup LLVM/Clang
       run: |
@@ -127,7 +127,15 @@ jobs:
         cd workspace
         git config --global user.name "github-actions"
         git config --global user.email "github-actions@github.com"
-        repo init --depth=1 -u ${{ steps.manifest.outputs.value }} -b ${{ github.event.inputs.MANIFEST_BRANCH }}
+        
+        BRANCH="${{ github.event.inputs.MANIFEST_BRANCH }}"
+        if [ "$BRANCH" = "automatic" ] || [ -z "$BRANCH" ]; then
+          echo "Using automatic (default) branch for manifest"
+          repo init --depth=1 -u ${{ steps.manifest.outputs.value }}
+        else
+          echo "Using branch: $BRANCH"
+          repo init --depth=1 -u ${{ steps.manifest.outputs.value }} -b "$BRANCH"
+        fi
   
     - name: Repo Sync
       run: |
@@ -139,7 +147,7 @@ jobs:
         cd workspace
         DEVICE_PATH="${{ github.event.inputs.DEVICE_PATH }}"
         
-        echo "Cloning device tree..."
+        echo "Cloning device tree (using default branch)..."
         git clone --depth=1 "${{ github.event.inputs.DEVICE_TREE }}" "./$DEVICE_PATH"
         cd $DEVICE_PATH
         
@@ -217,14 +225,12 @@ jobs:
             exit 1
         fi
       
-    - name: Install Python 2 (Legacy Build Scripts)
+    - name: Install Python 3
       if: github.event.inputs.MANIFEST_BRANCH != 'twrp-11' && github.event.inputs.MANIFEST_BRANCH != 'twrp-12.1' && github.event.inputs.MANIFEST_BRANCH != 'twrp-14.1'
       run: |
-        sudo add-apt-repository universe -y
-        sudo apt update
-        sudo apt install -y python2
-        sudo ln -sf /usr/bin/python2 /usr/bin/python
-        python --version
+        sudo apt -y install python3
+        cd /usr/bin
+        sudo ln -sf python3 python
 
     - name: Clean Obsolete Compiler Flags
       run: |
@@ -238,7 +244,63 @@ jobs:
           echo "BoardConfig.mk cleaned"
         fi
 
+    - name: Apply device-specific patches from patch.txt
+      run: |
+        cd workspace
+        DEVICE_NAME="${{ github.event.inputs.DEVICE_NAME }}"
+        PATCH_FILE="../patch.txt"
+        
+        if [ ! -f "$PATCH_FILE" ]; then
+          echo "patch.txt not found, skipping device-specific patches"
+          exit 0
+        fi
+        
+        echo "Searching patch for device: $DEVICE_NAME"
+        
+        # Tìm và extract patch cho device
+        awk -v dev="$DEVICE_NAME" '
+          BEGIN { found=0; patch=""; current="" }
+          /^# Device:/ { 
+            current = $3
+            if (current == dev) { found=1; next }
+            if (found) exit
+            next
+          }
+          found && !/^#/ && NF > 0 {
+            patch = patch $0 "\n"
+          }
+          END { if (patch != "") print patch }
+        ' "$PATCH_FILE" > /tmp/device_patch.txt
+        
+        if [ -s /tmp/device_patch.txt ]; then
+          echo "Found patch for device: $DEVICE_NAME"
+          echo "Patch content:"
+          cat /tmp/device_patch.txt
+          
+          if [ -f ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk ]; then
+            echo -e "\n# Device-specific patch from patch.txt" >> ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk
+            cat /tmp/device_patch.txt >> ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk
+            echo "Patch applied to BoardConfig.mk"
+          else
+            echo "BoardConfig.mk not found, cannot apply patch"
+            exit 1
+          fi
+        else
+          echo "No patch found for device: $DEVICE_NAME"
+        fi
+
+    - name: Fix PLATFORM_VERSION_ALL_CODENAMES (common)
+      run: |
+        cd workspace
+        if [ -f build/make/core/version_defaults.mk ]; then
+          if ! grep -q "PLATFORM_VERSION_ALL_CODENAMES" build/make/core/version_defaults.mk; then
+            echo "Adding PLATFORM_VERSION_ALL_CODENAMES to version_defaults.mk"
+            sed -i '/PLATFORM_VERSION_CODENAME/a PLATFORM_VERSION_ALL_CODENAMES := REL' build/make/core/version_defaults.mk
+          fi
+        fi
+
     - name: Build Image 
+      id: build
       run: |
         cd workspace
         export PATH=/usr/lib/llvm-14/bin:$PATH
@@ -258,8 +320,6 @@ jobs:
         export SKIP_ABI_CHECKS=true
         export WITH_TWRP_SWIPE=true
         export BUILD_NUMBER=$(date +%s)
-        export PLATFORM_VERSION=12
-        export PLATFORM_VERSION_CODENAME=REL
         
         lunch ${{ env.DEVICE_MAKEFILE }}-eng
         make clobber
