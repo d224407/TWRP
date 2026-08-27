@@ -48,13 +48,10 @@ jobs:
   build:
     name: Build TWRP
     timeout-minutes: 360
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     if: github.event.repository.owner.id == github.event.sender.id
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      USE_CCACHE: 1
-      CCACHE_EXEC: /usr/bin/ccache
-      CCACHE_DIR: /home/runner/work/ccache
     permissions:
       contents: write
     steps:
@@ -132,15 +129,6 @@ jobs:
         cd workspace
         repo sync -j$(nproc --all) --force-sync
 
-    - name: Cache Device Tree
-      uses: actions/cache@v3
-      with:
-        path: workspace/${{ github.event.inputs.DEVICE_PATH }}
-        key: device-tree-${{ github.event.inputs.DEVICE_NAME }}-${{ github.event.inputs.MANIFEST_BRANCH }}
-        restore-keys: |
-          device-tree-${{ github.event.inputs.DEVICE_NAME }}-
-          device-tree-
-
     - name: Auto Detect Device Tree Branch
       id: detect
       run: |
@@ -192,36 +180,12 @@ jobs:
         BRANCH="${{ env.USED_BRANCH }}"
         DEVICE_PATH="${{ github.event.inputs.DEVICE_PATH }}"
         
-        if [ -d "$DEVICE_PATH" ] && [ -f "$DEVICE_PATH/BoardConfig.mk" ]; then
-          echo "Device tree already exists, skipping clone"
-          cd $DEVICE_PATH
-        else
-          echo "Cloning with branch: $BRANCH"
-          git clone "${{ github.event.inputs.DEVICE_TREE }}" "./$DEVICE_PATH"
-          cd $DEVICE_PATH
-          git checkout "$BRANCH" 2>/dev/null || git checkout master
-        fi
+        echo "Cloning with branch: $BRANCH"
+        git clone "${{ github.event.inputs.DEVICE_TREE }}" "./$DEVICE_PATH"
+        cd $DEVICE_PATH
+        git checkout "$BRANCH" 2>/dev/null || git checkout master
         
         echo "COMMIT_ID=$(git rev-parse HEAD)" >> $GITHUB_ENV
-
-    - name: Cache CCache
-      uses: actions/cache@v3
-      with:
-        path: /home/runner/work/ccache
-        key: ccache-${{ github.event.inputs.DEVICE_NAME }}-${{ github.event.inputs.MANIFEST_BRANCH }}-${{ github.run_id }}
-        restore-keys: |
-          ccache-${{ github.event.inputs.DEVICE_NAME }}-${{ github.event.inputs.MANIFEST_BRANCH }}-
-          ccache-${{ github.event.inputs.DEVICE_NAME }}-
-          ccache-
-
-    - name: Cache Prebuilts
-      uses: actions/cache@v3
-      with:
-        path: workspace/prebuilts
-        key: prebuilts-${{ github.event.inputs.MANIFEST_BRANCH }}-${{ github.run_id }}
-        restore-keys: |
-          prebuilts-${{ github.event.inputs.MANIFEST_BRANCH }}-
-          prebuilts-
 
     - name: Create embedded.mk
       run: |
@@ -282,16 +246,6 @@ jobs:
         cd /usr/bin
         sudo ln -sf python3 python
 
-    - name: Clean Build Dependencies
-      run: |
-        cd workspace
-        find . -name "*.d" -type f -delete
-        find . -name "*.o" -type f -delete
-        rm -rf out/target/common/obj 2>/dev/null || true
-        rm -rf out/target/product/${{ github.event.inputs.DEVICE_NAME }}/obj 2>/dev/null || true
-        rm -rf out/host/linux-x86/obj 2>/dev/null || true
-        ccache -C
-
     - name: Clean Obsolete Compiler Flags
       run: |
         cd workspace
@@ -301,8 +255,6 @@ jobs:
           sed -i '/TARGET_USE_CLANG/d' ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk
           sed -i '/TARGET_USE_GCC/d' ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk
           sed -i '/TARGET_USE_CLANG_LLD/d' ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk
-          
-          echo "BoardConfig.mk cleaned successfully"
         fi
 
     - name: Build Image 
@@ -319,9 +271,6 @@ jobs:
         export OBJDUMP=llvm-objdump
         export READELF=llvm-readelf
         
-        ccache -M 20G
-        ccache -z
-        
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
         export TARGET_USES_MKE2FS=true
@@ -334,15 +283,7 @@ jobs:
         lunch ${{ env.DEVICE_MAKEFILE }}-eng
         make clobber
         make clean
-        make ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all) 2>&1 | tee build.log
-        
-        if [ ${PIPESTATUS[0]} -ne 0 ]; then
-          echo "First build attempt failed, cleaning dependency files..."
-          find . -name "*.d" -type f -delete
-          make ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all)
-        fi
-        
-        ccache -s
+        make ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all)
       
     - name: Set Build Date
       run: |
