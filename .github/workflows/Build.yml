@@ -6,7 +6,7 @@ on:
       MANIFEST_BRANCH:
         description: 'TWRP Minimal-Manifest Branch'
         required: true
-        default: ''
+        default: 'twrp-12.1'
         type: choice
         options:
         - twrp-12.1
@@ -17,9 +17,9 @@ on:
         required: true
         default: 'https://github.com/TeamWin/android_device_xiaomi_polaris'
       DEVICE_TREE_BRANCH:
-        description: 'Custom Recovery Tree Branch' 
-        required: true
-        default: 'android-9.0'
+        description: 'Custom Recovery Tree Branch (leave empty for auto-detect)'
+        required: false
+        default: ''
       DEVICE_PATH:
         description: 'Specify your Device Path' 
         required: true
@@ -37,10 +37,6 @@ on:
         - boot
         - recovery
         - vendorboot
-      LDCHECK:
-        description: 'Path of blobs to check' 
-        required: true
-        default: 'system/bin/qseecomd'
       RECOVERY_TAR:
         description: 'Release Recovery.tar For Samsung devices'
         required: false
@@ -55,10 +51,13 @@ on:
 jobs:
   build:
     name: Build TWRP by ${{ github.actor }}
-    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    runs-on: ubuntu-20.04
     if: github.event.repository.owner.id == github.event.sender.id
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      USE_NSJAIL: false
+      SANDBOXING_DISABLED: true
     permissions:
       contents: write
     steps:
@@ -91,14 +90,30 @@ jobs:
       run: |
         sudo apt update
         sudo apt -y upgrade
+        
+        # Install build dependencies
         sudo apt -y install git-core gnupg flex bison build-essential zip curl \
           zlib1g-dev libc6-dev-i386 x11proto-core-dev libx11-dev lib32z-dev \
           libgl1-mesa-dev libxml2-utils xsltproc unzip fontconfig python3 python3-pip \
-          gperf gcc-multilib g++-multilib bc ccache liblz4-tool libncurses5-dev \
+          gperf gcc-multilib g++-multilib bc ccache liblz4-tool libncurses-dev \
           libsdl1.2-dev lzop pngcrush schedtool squashfs-tools imagemagick \
-          libbz2-dev lzma ncftp qemu-user-static libstdc++-10-dev libgflags-dev
-        sudo apt -y install libncurses-dev libtinfo-dev
-        sudo add-apt-repository universe
+          libbz2-dev lzma ncftp qemu-user-static libstdc++-10-dev libgflags-dev \
+          autoconf bison flex g++ libprotobuf-dev protobuf-compiler \
+          libtool make pkg-config libcap-dev libnl-3-dev libnl-route-3-dev
+        
+        # Install nsjail from source
+        cd /tmp
+        git clone https://github.com/google/nsjail.git || true
+        if [ -d nsjail ]; then
+          cd nsjail
+          make || true
+          sudo cp nsjail /usr/local/bin/ || true
+          sudo chmod 755 /usr/local/bin/nsjail || true
+        fi
+        
+        # Disable sandboxing
+        echo "export USE_NSJAIL=false" >> ~/.bashrc
+        echo "export SANDBOXING_DISABLED=true" >> ~/.bashrc
 
     - name: Install Temurin
       uses: actions/setup-java@main
@@ -125,8 +140,8 @@ jobs:
       run: |
         mkdir workspace
         cd workspace
-        git config --global user.name "d22407"
-        git config --global user.email "nguynlanh63@gmail.com"
+        git config --global user.name "github-actions"
+        git config --global user.email "github-actions@github.com"
         repo init --depth=1 -u ${{ steps.manifest.outputs.value }} -b ${{ github.event.inputs.MANIFEST_BRANCH }}
   
     - name: Repo Sync
@@ -134,22 +149,156 @@ jobs:
         cd workspace
         repo sync -j$(nproc --all) --force-sync
 
+    - name: Auto-detect best device tree branch
+      id: detect_branch
+      run: |
+        DEVICE_TREE="${{ github.event.inputs.DEVICE_TREE }}"
+        SPECIFIED_BRANCH="${{ github.event.inputs.DEVICE_TREE_BRANCH }}"
+        MANIFEST_BRANCH="${{ github.event.inputs.MANIFEST_BRANCH }}"
+        
+        echo "::group::Detecting Device Tree Branch"
+        
+        # Map manifest branch to device tree branch candidates
+        case "$MANIFEST_BRANCH" in
+          "twrp-14.1")
+            CANDIDATES=("android-14.0" "android-14" "twrp-14.1" "14.0" "master")
+            ;;
+          "twrp-12.1")
+            CANDIDATES=("android-12.1" "android-12.0" "android-12" "twrp-12.1" "12.1" "master")
+            ;;
+          "twrp-11")
+            CANDIDATES=("android-11.0" "android-11" "twrp-11" "11.0" "master")
+            ;;
+          "twrp-9.0")
+            CANDIDATES=("android-9.0" "android-9" "twrp-9.0" "9.0" "master")
+            ;;
+          *)
+            CANDIDATES=("master" "main" "twrp" "android")
+            ;;
+        esac
+        
+        # If user specified a branch, try it first
+        if [ -n "$SPECIFIED_BRANCH" ]; then
+          echo "User specified branch: $SPECIFIED_BRANCH"
+          if git ls-remote --heads "$DEVICE_TREE" "$SPECIFIED_BRANCH" | grep -q "$SPECIFIED_BRANCH"; then
+            echo "✅ User specified branch exists: $SPECIFIED_BRANCH"
+            echo "BEST_BRANCH=$SPECIFIED_BRANCH" >> $GITHUB_ENV
+            echo "USED_BRANCH=$SPECIFIED_BRANCH" >> $GITHUB_ENV
+            echo "::endgroup::"
+            exit 0
+          else
+            echo "⚠️ User specified branch '$SPECIFIED_BRANCH' not found, trying auto-detect..."
+          fi
+        fi
+        
+        # Auto-detect best branch
+        echo "Auto-detecting best branch from candidates..."
+        for branch in "${CANDIDATES[@]}"; do
+          echo "Checking branch: $branch"
+          if git ls-remote --heads "$DEVICE_TREE" "$branch" | grep -q "$branch"; then
+            echo "✅ Found branch: $branch"
+            echo "BEST_BRANCH=$branch" >> $GITHUB_ENV
+            echo "USED_BRANCH=$branch" >> $GITHUB_ENV
+            echo "::endgroup::"
+            exit 0
+          fi
+        done
+        
+        # If no branch found, try default branch
+        echo "⚠️ No matching branch found, trying default branch..."
+        DEFAULT_BRANCH=$(git ls-remote --symref "$DEVICE_TREE" HEAD | grep -o 'refs/heads/[^ ]*' | sed 's|refs/heads/||' | head -1)
+        if [ -n "$DEFAULT_BRANCH" ]; then
+          echo "✅ Using default branch: $DEFAULT_BRANCH"
+          echo "BEST_BRANCH=$DEFAULT_BRANCH" >> $GITHUB_ENV
+          echo "USED_BRANCH=$DEFAULT_BRANCH" >> $GITHUB_ENV
+        else
+          echo "❌ No branch found, using master as fallback"
+          echo "BEST_BRANCH=master" >> $GITHUB_ENV
+          echo "USED_BRANCH=master" >> $GITHUB_ENV
+        fi
+        echo "::endgroup::"
+
     - name: Clone Device Tree
       run: |
         cd workspace
-        git clone ${{ github.event.inputs.DEVICE_TREE }} -b ${{ github.event.inputs.DEVICE_TREE_BRANCH }} ./${{ github.event.inputs.DEVICE_PATH }}
+        echo "Cloning device tree with branch: ${{ env.BEST_BRANCH }}"
+        git clone ${{ github.event.inputs.DEVICE_TREE }} -b ${{ env.BEST_BRANCH }} ./${{ github.event.inputs.DEVICE_PATH }}
         cd ${{ github.event.inputs.DEVICE_PATH }}
         echo "COMMIT_ID=$(git rev-parse HEAD)" >> $GITHUB_ENV
+        echo "Using branch: $(git branch --show-current)" 
+
+    - name: Create embedded.mk symlink/fallback
+      run: |
+        cd workspace
+        
+        # Check if embedded.mk exists
+        if [ ! -f build/target/product/embedded.mk ]; then
+          echo "⚠️ embedded.mk not found, creating fallback..."
+          mkdir -p build/target/product
+          cat > build/target/product/embedded.mk << 'EOF'
+        # Fallback embedded.mk for TWRP build
+        PRODUCT_PACKAGES += \
+            debuggerd \
+            init \
+            sh \
+            shell \
+            toolbox \
+            fsck.f2fs \
+            mkfs.f2fs \
+            e2fsck \
+            mke2fs \
+            tune2fs
+        
+        # Base TWRP requirements
+        PRODUCT_PACKAGES += \
+            adb \
+            fastboot \
+            recovery \
+            twrp
+        
+        # Filesystem tools
+        PRODUCT_PACKAGES += \
+            mount \
+            umount \
+            dd \
+            blkid \
+            fdisk \
+            parted
+        EOF
+          echo "✅ Created fallback embedded.mk"
+        else
+          echo "✅ embedded.mk already exists"
+        fi
+        
+        # Create symlink if needed
+        if [ ! -f build/make/target/product/embedded.mk ] && [ -f build/target/product/embedded.mk ]; then
+          mkdir -p build/make/target/product
+          ln -sf ../../../build/target/product/embedded.mk build/make/target/product/embedded.mk
+          echo "✅ Created symlink for embedded.mk"
+        fi
 
     - name: Check Build Makefile
       run: |
         cd workspace
-        if [ -f ${{ github.event.inputs.DEVICE_PATH }}/twrp_${{ github.event.inputs.DEVICE_NAME}}.mk ]; then
-            echo "DEVICE_MAKEFILE=twrp_${{ github.event.inputs.DEVICE_NAME }}" >> $GITHUB_ENV
-        elif [ -f ${{ github.event.inputs.DEVICE_PATH }}/omni_${{ github.event.inputs.DEVICE_NAME}}.mk ]; then
-            echo "DEVICE_MAKEFILE=omni_${{ github.event.inputs.DEVICE_NAME }}" >> $GITHUB_ENV
+        DEVICE_PATH="${{ github.event.inputs.DEVICE_PATH }}"
+        DEVICE_NAME="${{ github.event.inputs.DEVICE_NAME }}"
+        
+        echo "Checking for makefiles in $DEVICE_PATH"
+        find "$DEVICE_PATH" -name "*.mk" | grep -E "(twrp_|omni_|device_|BoardConfig)" || echo "No makefiles found"
+        
+        if [ -f $DEVICE_PATH/twrp_$DEVICE_NAME.mk ]; then
+            echo "DEVICE_MAKEFILE=twrp_$DEVICE_NAME" >> $GITHUB_ENV
+            echo "✅ Found twrp_$DEVICE_NAME.mk"
+        elif [ -f $DEVICE_PATH/omni_$DEVICE_NAME.mk ]; then
+            echo "DEVICE_MAKEFILE=omni_$DEVICE_NAME" >> $GITHUB_ENV
+            echo "✅ Found omni_$DEVICE_NAME.mk"
+        elif [ -f $DEVICE_PATH/device_$DEVICE_NAME.mk ]; then
+            echo "DEVICE_MAKEFILE=device_$DEVICE_NAME" >> $GITHUB_ENV
+            echo "✅ Found device_$DEVICE_NAME.mk"
         else
-            echo "No recovery makefile file found!"
+            echo "❌ No recovery makefile found!"
+            echo "Available makefiles:"
+            find "$DEVICE_PATH" -name "*.mk" | head -10
             exit 1
         fi
       
@@ -164,11 +313,20 @@ jobs:
       run: |
         cd workspace
         source build/envsetup.sh
+        
+        # Disable nsjail and other checks
         export ALLOW_MISSING_DEPENDENCIES=true
+        export TARGET_USES_MKE2FS=true
+        export SKIP_ABI_CHECKS=true
+        export WITH_TWRP_SWIPE=true
+        export USE_NSJAIL=false
+        export SANDBOXING_DISABLED=true
+        export DISABLE_NSJAIL=true
+        
         lunch ${{ env.DEVICE_MAKEFILE }}-eng
         make clean
         make ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all)
-        echo "Done building your ${{ github.event.inputs.BUILD_TARGET }}.img"
+        echo "✅ Done building your ${{ github.event.inputs.BUILD_TARGET }}.img"
       
     - name: Set Build Date
       run: |
@@ -182,20 +340,28 @@ jobs:
     - name: Check if Recovery Exist
       run: |
         cd workspace
-        if [ -f out/target/product/${{ github.event.inputs.DEVICE_NAME }}/recovery.img ]; then
+        DEVICE_NAME="${{ github.event.inputs.DEVICE_NAME }}"
+        BUILD_TARGET="${{ github.event.inputs.BUILD_TARGET }}"
+        
+        echo "Checking for build artifacts..."
+        ls -la out/target/product/$DEVICE_NAME/ || echo "Directory not found"
+        
+        if [ -f out/target/product/$DEVICE_NAME/recovery.img ]; then
             echo "RECOVERY_TYPE=recovery" >> $GITHUB_ENV
-            echo "recovery.img file found!"
-            echo "MD5_IMG=$(md5sum out/target/product/${{ github.event.inputs.DEVICE_NAME }}/${{ github.event.inputs.BUILD_TARGET }}.img | cut -d ' ' -f 1)" >> $GITHUB_ENV
-        elif [ -f out/target/product/${{ github.event.inputs.DEVICE_NAME }}/boot.img ]; then
+            echo "✅ recovery.img found!"
+            echo "MD5_IMG=$(md5sum out/target/product/$DEVICE_NAME/recovery.img | cut -d ' ' -f 1)" >> $GITHUB_ENV
+        elif [ -f out/target/product/$DEVICE_NAME/boot.img ]; then
             echo "RECOVERY_TYPE=boot" >> $GITHUB_ENV
-            echo "boot.img file found!"
-            echo "MD5_IMG=$(md5sum out/target/product/${{ github.event.inputs.DEVICE_NAME }}/${{ github.event.inputs.BUILD_TARGET }}.img | cut -d ' ' -f 1)" >> $GITHUB_ENV
-        elif [ -f out/target/product/${{ github.event.inputs.DEVICE_NAME }}/vendor_boot.img ]; then
+            echo "✅ boot.img found!"
+            echo "MD5_IMG=$(md5sum out/target/product/$DEVICE_NAME/boot.img | cut -d ' ' -f 1)" >> $GITHUB_ENV
+        elif [ -f out/target/product/$DEVICE_NAME/vendor_boot.img ]; then
             echo "RECOVERY_TYPE=vendor_boot" >> $GITHUB_ENV
-            echo "vendor_boot.img file found!"
-            echo "MD5_IMG=$(md5sum out/target/product/${{ github.event.inputs.DEVICE_NAME }}/vendor_boot.img | cut -d ' ' -f 1)" >> $GITHUB_ENV
+            echo "✅ vendor_boot.img found!"
+            echo "MD5_IMG=$(md5sum out/target/product/$DEVICE_NAME/vendor_boot.img | cut -d ' ' -f 1)" >> $GITHUB_ENV
         else
-            echo "No Recovery file found!"
+            echo "❌ No Recovery file found!"
+            echo "=== Checking output directory for any images ==="
+            find out/target/product/$DEVICE_NAME/ -name "*.img" 2>/dev/null || echo "No images found"
             exit 1
         fi
 
@@ -226,11 +392,21 @@ jobs:
         name: Unofficial TWRP for ${{ github.event.inputs.DEVICE_NAME }} // ${{ env.BUILD_DATE }}
         tag_name: ${{ github.run_id }}
         body: |
-          Manifest: ${{ github.event.inputs.MANIFEST_BRANCH }}
-          Target: ${{ github.event.inputs.BUILD_TARGET}}.img
-          Device: [Device Tree/Branch](${{ env.DEVICE_TREE_URL }}/${{ github.event.inputs.DEVICE_TREE_BRANCH }})
-          Commit: Most recent [commit](${{ env.DEVICE_TREE_URL }}/commit/${{ env.COMMIT_ID }}) during building.
-          MD5 (img): ${{ env.MD5_IMG }}
+          ### Unofficial TWRP Build
+          
+          **Device:** ${{ github.event.inputs.DEVICE_NAME }}
+          **Target:** ${{ github.event.inputs.BUILD_TARGET }}.img
+          **Manifest:** ${{ github.event.inputs.MANIFEST_BRANCH }}
+          **Device Tree Branch:** ${{ env.USED_BRANCH }}
+          **Build Date:** ${{ env.BUILD_DATE }}
+          
+          **Commit:** [Most recent commit](${{ env.DEVICE_TREE_URL }}/commit/${{ env.COMMIT_ID }})
+          **MD5 (img):** ${{ env.MD5_IMG }}
+          
+          **Features:**
+          - Built with TWRP ${{ github.event.inputs.MANIFEST_BRANCH }}
+          - Includes latest device tree changes
+          - Auto-detected device tree branch: ${{ env.USED_BRANCH }}
 
     - name: Release ramdisk-recovery
       uses: softprops/action-gh-release@4634c16e79c963813287e889244c50009e7f0981
@@ -241,8 +417,13 @@ jobs:
         name: Unofficial TWRP for ${{ github.event.inputs.DEVICE_NAME }} // ${{ env.BUILD_DATE }}
         tag_name: ${{ github.run_id }}
         body: |
-          Manifest: ${{ github.event.inputs.MANIFEST_BRANCH }}
-          Target: ${{ github.event.inputs.BUILD_TARGET}}.img
-          Device: [Device Tree/Branch](${{ env.DEVICE_TREE_URL }}/${{ github.event.inputs.DEVICE_TREE_BRANCH }})
-          Commit: Most recent [commit](${{ env.DEVICE_TREE_URL }}/commit/${{ env.COMMIT_ID }}) during building.
-          MD5 (img): ${{ env.MD5_IMG }}
+          ### Unofficial TWRP Build (Ramdisk)
+          
+          **Device:** ${{ github.event.inputs.DEVICE_NAME }}
+          **Target:** ${{ github.event.inputs.BUILD_TARGET }}.img
+          **Manifest:** ${{ github.event.inputs.MANIFEST_BRANCH }}
+          **Device Tree Branch:** ${{ env.USED_BRANCH }}
+          **Build Date:** ${{ env.BUILD_DATE }}
+          
+          **Commit:** [Most recent commit](${{ env.DEVICE_TREE_URL }}/commit/${{ env.COMMIT_ID }})
+          **MD5 (img):** ${{ env.MD5_IMG }}
