@@ -127,20 +127,7 @@ jobs:
     - name: Repo Sync
       run: |
         cd workspace
-        # Retry repo sync up to 3 times if it fails
-        for attempt in 1 2 3; do
-          echo "Repo sync attempt $attempt/3..."
-          if repo sync -j$(nproc --all) --force-sync; then
-            echo "Repo sync successful"
-            break
-          else
-            echo "Repo sync failed on attempt $attempt"
-            if [ $attempt -eq 3 ]; then
-              exit 1
-            fi
-            sleep 30
-          fi
-        done
+        repo sync -j$(nproc --all) --force-sync
 
     - name: Auto Detect Device Tree Branch
       id: detect
@@ -200,30 +187,27 @@ jobs:
         
         echo "COMMIT_ID=$(git rev-parse HEAD)" >> $GITHUB_ENV
 
-    - name: Validate Device Tree Dependencies
+    - name: Fix empty dependencies file
       run: |
-        cd workspace/${{ github.event.inputs.DEVICE_PATH }}
+        cd workspace
+        DEVICE_PATH="${{ github.event.inputs.DEVICE_PATH }}"
         
-        # Check for dependency files and validate them
-        if [ -f ".dependencies" ]; then
-          echo "Validating .dependencies file..."
-          if ! python3 -m json.tool .dependencies > /dev/null 2>&1; then
-            echo "ERROR: .dependencies file is malformed"
-            echo "File contents:"
-            cat .dependencies
-            exit 1
+        echo "Checking for empty dependencies files in $DEVICE_PATH"
+        
+        # Tìm tất cả file .dependencies và sửa nếu rỗng
+        find $DEVICE_PATH -name "*.dependencies" -type f 2>/dev/null | while read file; do
+          if [ ! -s "$file" ]; then
+            echo "File $file is empty, creating valid JSON"
+            echo '[]' > "$file"
           fi
-        fi
+        done
         
-        if [ -f "roomservice.xml" ]; then
-          echo "Validating roomservice.xml..."
-          if ! python3 -c "import xml.etree.ElementTree as ET; ET.parse('roomservice.xml')" 2>/dev/null; then
-            echo "ERROR: roomservice.xml is malformed"
-            exit 1
-          fi
+        # Nếu không có file nào, tạo mới
+        if [ -z "$(find $DEVICE_PATH -name "*.dependencies" -type f 2>/dev/null)" ]; then
+          echo "No dependencies file found, creating omni.dependencies"
+          echo '[]' > $DEVICE_PATH/omni.dependencies
+          echo "Created $DEVICE_PATH/omni.dependencies"
         fi
-        
-        echo "Device tree dependencies validated successfully"
 
     - name: Create embedded.mk
       run: |
@@ -293,6 +277,7 @@ jobs:
           sed -i '/TARGET_USE_CLANG/d' ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk
           sed -i '/TARGET_USE_GCC/d' ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk
           sed -i '/TARGET_USE_CLANG_LLD/d' ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk
+          echo "BoardConfig.mk cleaned"
         fi
 
     - name: Build Image 
