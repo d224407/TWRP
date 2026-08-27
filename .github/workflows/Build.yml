@@ -48,7 +48,7 @@ jobs:
   build:
     name: Build TWRP
     timeout-minutes: 360
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     if: github.event.repository.owner.id == github.event.sender.id
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -292,28 +292,17 @@ jobs:
         rm -rf out/host/linux-x86/obj 2>/dev/null || true
         ccache -C
 
-    - name: Force Use LLVM/Clang
+    - name: Clean Obsolete Compiler Flags
       run: |
         cd workspace
-        
         if [ -f ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk ]; then
-          echo "Patching BoardConfig.mk to use Clang..."
-          cat >> ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk << 'EOF'
-        
-        # Force use of LLVM/Clang
-        TARGET_USE_GCC := false
-        TARGET_USE_CLANG := true
-        TARGET_USE_CLANG_LLD := true
-        TARGET_USE_SANITIZER := false
-        DISABLE_LLVM_TOOLS_UPDATE := true
-        USE_CLANG_PLATFORM_BUILD := true
-        EOF
-        fi
-        
-        if [ -f build/core/clang/config.mk ]; then
-          echo "Setting Clang as default compiler..."
-          export TARGET_USE_GCC=false
-          export TARGET_USE_CLANG=true
+          echo "Cleaning obsolete compiler flags from BoardConfig.mk..."
+          sed -i '/USE_CLANG_PLATFORM_BUILD/d' ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk
+          sed -i '/TARGET_USE_CLANG/d' ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk
+          sed -i '/TARGET_USE_GCC/d' ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk
+          sed -i '/TARGET_USE_CLANG_LLD/d' ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk
+          
+          echo "BoardConfig.mk cleaned successfully"
         fi
 
     - name: Build Image 
