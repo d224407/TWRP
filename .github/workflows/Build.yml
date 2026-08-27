@@ -48,15 +48,6 @@ jobs:
     if: github.event.repository.owner.id == github.event.sender.id
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      BUILD_BROKEN_LINK_TYPE: true
-      BUILD_BROKEN_DUP_RULES: true
-      BUILD_BROKEN_MISSING_REQUIRED_MODULES: true
-      BUILD_BROKEN_ELF_PREBUILT_PRODUCT_COPY_FILES: true
-      BUILD_BROKEN_USES_BUILD_COPY_HEADERS: true
-      BUILD_BROKEN_VINTF_PRODUCT_COPY_FILES: true
-      BUILD_BROKEN_PREBUILT_ELF_FILES: true
-      BUILD_BROKEN_VERIFY_USES_LIBRARIES: true
-      RELAX_USES_LIBRARY_CHECK: true
     permissions:
       contents: write
     steps:
@@ -244,6 +235,27 @@ jobs:
           echo "BoardConfig.mk cleaned"
         fi
 
+    - name: Apply common patches from common_patch.txt
+      run: |
+        cd workspace
+        COMMON_PATCH_FILE="../common_patch.txt"
+        
+        if [ ! -f "$COMMON_PATCH_FILE" ]; then
+          echo "common_patch.txt not found, skipping common patches"
+          exit 0
+        fi
+        
+        echo "Applying common patches from common_patch.txt..."
+        
+        if [ -f ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk ]; then
+          echo -e "\n# Common patches from common_patch.txt" >> ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk
+          cat "$COMMON_PATCH_FILE" >> ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk
+          echo "Common patches applied to BoardConfig.mk"
+        else
+          echo "BoardConfig.mk not found, cannot apply common patches"
+          exit 1
+        fi
+
     - name: Apply device-specific patches from patch.txt
       run: |
         cd workspace
@@ -257,7 +269,6 @@ jobs:
         
         echo "Searching patch for device: $DEVICE_NAME"
         
-        # Tìm và extract patch cho device
         awk -v dev="$DEVICE_NAME" '
           BEGIN { found=0; patch=""; current="" }
           /^# Device:/ { 
@@ -280,9 +291,9 @@ jobs:
           if [ -f ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk ]; then
             echo -e "\n# Device-specific patch from patch.txt" >> ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk
             cat /tmp/device_patch.txt >> ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk
-            echo "Patch applied to BoardConfig.mk"
+            echo "Device-specific patch applied to BoardConfig.mk"
           else
-            echo "BoardConfig.mk not found, cannot apply patch"
+            echo "BoardConfig.mk not found, cannot apply device-specific patch"
             exit 1
           fi
         else
