@@ -52,6 +52,9 @@ jobs:
     if: github.event.repository.owner.id == github.event.sender.id
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      USE_CCACHE: 1
+      CCACHE_EXEC: /usr/bin/ccache
+      CCACHE_DIR: /home/runner/work/ccache
     permissions:
       contents: write
     steps:
@@ -83,7 +86,17 @@ jobs:
           libgl1-mesa-dev libxml2-utils xsltproc unzip fontconfig python3 python3-pip \
           gperf gcc-multilib g++-multilib bc ccache liblz4-tool libncurses-dev \
           libsdl1.2-dev lzop pngcrush schedtool squashfs-tools imagemagick \
-          libbz2-dev lzma ncftp qemu-user-static libstdc++-10-dev libgflags-dev
+          libbz2-dev lzma ncftp qemu-user-static libstdc++-10-dev libgflags-dev \
+          clang-14 lld-14 llvm-14
+
+    - name: Setup LLVM/Clang
+      run: |
+        sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 100
+        sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-14 100
+        sudo update-alternatives --install /usr/bin/ld ld /usr/bin/lld-14 100
+        export PATH=/usr/lib/llvm-14/bin:$PATH
+        echo "PATH=/usr/lib/llvm-14/bin:$PATH" >> $GITHUB_ENV
+        clang --version
 
     - name: Install Temurin
       uses: actions/setup-java@main
@@ -194,7 +207,7 @@ jobs:
     - name: Cache CCache
       uses: actions/cache@v3
       with:
-        path: workspace/.ccache
+        path: /home/runner/work/ccache
         key: ccache-${{ github.event.inputs.DEVICE_NAME }}-${{ github.event.inputs.MANIFEST_BRANCH }}-${{ github.run_id }}
         restore-keys: |
           ccache-${{ github.event.inputs.DEVICE_NAME }}-${{ github.event.inputs.MANIFEST_BRANCH }}-
@@ -274,38 +287,72 @@ jobs:
         cd workspace
         find . -name "*.d" -type f -delete
         find . -name "*.o" -type f -delete
-        find out -name "*.d" -type f -delete 2>/dev/null || true
         rm -rf out/target/common/obj 2>/dev/null || true
+        rm -rf out/target/product/${{ github.event.inputs.DEVICE_NAME }}/obj 2>/dev/null || true
         rm -rf out/host/linux-x86/obj 2>/dev/null || true
+        ccache -C
+
+    - name: Force Use LLVM/Clang
+      run: |
+        cd workspace
+        
+        if [ -f ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk ]; then
+          echo "Patching BoardConfig.mk to use Clang..."
+          cat >> ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk << 'EOF'
+        
+        # Force use of LLVM/Clang
+        TARGET_USE_GCC := false
+        TARGET_USE_CLANG := true
+        TARGET_USE_CLANG_LLD := true
+        TARGET_USE_SANITIZER := false
+        DISABLE_LLVM_TOOLS_UPDATE := true
+        USE_CLANG_PLATFORM_BUILD := true
+        EOF
+        fi
+        
+        if [ -f build/core/clang/config.mk ]; then
+          echo "Setting Clang as default compiler..."
+          export TARGET_USE_GCC=false
+          export TARGET_USE_CLANG=true
+        fi
 
     - name: Build Image 
       run: |
         cd workspace
-        export USE_CCACHE=1
-        export CCACHE_EXEC=/usr/bin/ccache
-        export CCACHE_DIR=$PWD/.ccache
+        export PATH=/usr/lib/llvm-14/bin:$PATH
+        export CC=clang
+        export CXX=clang++
+        export LD=ld.lld
+        export AR=llvm-ar
+        export NM=llvm-nm
+        export STRIP=llvm-strip
+        export OBJCOPY=llvm-objcopy
+        export OBJDUMP=llvm-objdump
+        export READELF=llvm-readelf
+        
         ccache -M 20G
         ccache -z
-        
-        export BUILD_NUMBER=$(date +%s)
-        export PLATFORM_VERSION=12
-        export PLATFORM_VERSION_CODENAME=REL
-        export WITH_TWRP_SWIPE=true
         
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
         export TARGET_USES_MKE2FS=true
         export SKIP_ABI_CHECKS=true
         export WITH_TWRP_SWIPE=true
+        export BUILD_NUMBER=$(date +%s)
+        export PLATFORM_VERSION=12
+        export PLATFORM_VERSION_CODENAME=REL
         
         lunch ${{ env.DEVICE_MAKEFILE }}-eng
-        make clean
         make clobber
-        make ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all) || {
-          echo "Build failed, trying without dependency files"
+        make clean
+        make ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all) 2>&1 | tee build.log
+        
+        if [ ${PIPESTATUS[0]} -ne 0 ]; then
+          echo "First build attempt failed, cleaning dependency files..."
           find . -name "*.d" -type f -delete
           make ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all)
-        }
+        fi
+        
         ccache -s
       
     - name: Set Build Date
@@ -371,6 +418,7 @@ jobs:
           Build Date: ${{ env.BUILD_DATE }}
           Commit: ${{ env.DEVICE_TREE_URL }}/commit/${{ env.COMMIT_ID }}
           MD5: ${{ env.MD5_IMG }}
+          Compiler: LLVM/Clang 14
 
     - name: Release Ramdisk
       uses: softprops/action-gh-release@4634c16e79c963813287e889244c50009e7f0981
@@ -388,3 +436,4 @@ jobs:
           Build Date: ${{ env.BUILD_DATE }}
           Commit: ${{ env.DEVICE_TREE_URL }}/commit/${{ env.COMMIT_ID }}
           MD5: ${{ env.MD5_IMG }}
+          Compiler: LLVM/Clang 14
