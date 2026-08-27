@@ -217,12 +217,14 @@ jobs:
             exit 1
         fi
       
-    - name: Install Python 3
+    - name: Install Python 2 (Legacy Build Scripts)
       if: github.event.inputs.MANIFEST_BRANCH != 'twrp-11' && github.event.inputs.MANIFEST_BRANCH != 'twrp-12.1' && github.event.inputs.MANIFEST_BRANCH != 'twrp-14.1'
       run: |
-        sudo apt -y install python3
-        cd /usr/bin
-        sudo ln -sf python3 python
+        sudo add-apt-repository universe -y
+        sudo apt update
+        sudo apt install -y python2
+        sudo ln -sf /usr/bin/python2 /usr/bin/python
+        python --version
 
     - name: Clean Obsolete Compiler Flags
       run: |
