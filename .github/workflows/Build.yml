@@ -44,7 +44,7 @@ jobs:
   build:
     name: Build TWRP
     timeout-minutes: 360
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     if: github.event.repository.owner.id == github.event.sender.id
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -89,7 +89,7 @@ jobs:
           gperf gcc-multilib g++-multilib bc ccache liblz4-tool libncurses-dev \
           libsdl1.2-dev lzop pngcrush schedtool squashfs-tools imagemagick \
           libbz2-dev lzma ncftp qemu-user-static libstdc++-10-dev libgflags-dev \
-          clang-14 lld-14 llvm-14
+          clang-14 lld-14 llvm-14 libtinfo5 libncurses5
 
     - name: Setup LLVM/Clang
       run: |
@@ -139,7 +139,7 @@ jobs:
         cd workspace
         DEVICE_PATH="${{ github.event.inputs.DEVICE_PATH }}"
         
-        echo "Cloning device tree (using default branch)..."
+        echo "Cloning device tree..."
         git clone --depth=1 "${{ github.event.inputs.DEVICE_TREE }}" "./$DEVICE_PATH"
         cd $DEVICE_PATH
         
@@ -237,7 +237,6 @@ jobs:
         fi
 
     - name: Build Image 
-      id: build
       run: |
         cd workspace
         export PATH=/usr/lib/llvm-14/bin:$PATH
@@ -263,39 +262,7 @@ jobs:
         lunch ${{ env.DEVICE_MAKEFILE }}-eng
         make clobber
         make clean
-        
-        # Build và lưu log lỗi
-        make ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all) 2>&1 | tee build.log
-        BUILD_EXIT_CODE=${PIPESTATUS[0]}
-        
-        # Chỉ hiển thị 100 dòng cuối của log lỗi
-        if [ $BUILD_EXIT_CODE -ne 0 ]; then
-          echo "::group::Build failed - Last 100 lines of error log"
-          tail -n 100 build.log
-          echo "::endgroup::"
-          echo "BUILD_FAILED=true" >> $GITHUB_ENV
-        else
-          echo "BUILD_FAILED=false" >> $GITHUB_ENV
-        fi
-        
-        # Lưu log file để upload
-        cp build.log ${{ github.workspace }}/build.log
-        exit $BUILD_EXIT_CODE
-      continue-on-error: true
-
-    - name: Upload build log if failed
-      if: env.BUILD_FAILED == 'true'
-      uses: actions/upload-artifact@v4
-      with:
-        name: build-error-log
-        path: build.log
-        retention-days: 7
-
-    - name: Check build result
-      if: env.BUILD_FAILED == 'true'
-      run: |
-        echo "Build failed. Check the uploaded artifact for full log."
-        exit 1
+        make ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all)
       
     - name: Set Build Date
       run: |
