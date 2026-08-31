@@ -95,12 +95,11 @@ jobs:
         sudo ln -sf ~/bin/repo /usr/bin/repo
 
     - name: Setup Java & Swap
-      run: |
-        java -version
       uses: actions/setup-java@main
+      with:
         distribution: temurin
         java-version: 17
-      uses: pierotofy/set-swap-space@master
+    - uses: pierotofy/set-swap-space@master
       with:
         swap-size-gb: 24
 
@@ -189,7 +188,7 @@ jobs:
         export ARCH=$KERNEL_ARCH CROSS_COMPILE=aarch64-linux-gnu- CC=clang PATH=/usr/lib/llvm-14/bin:$PATH
         
         make O=out $(basename "$DEFCONFIG") 2>/dev/null
-        make O=out -j$(nproc --all) 2>&1 | tail -20
+        make O=out -j$(nproc --all) HOSTCFLAGS="-Wno-error" HOSTCXXFLAGS="-Wno-error" 2>&1 | tail -20
         
         for img in out/arch/$KERNEL_ARCH/boot/Image.gz-dtb out/arch/$KERNEL_ARCH/boot/Image.gz out/arch/$KERNEL_ARCH/boot/Image; do
           [ -f "$img" ] && { cp "$img" "../${{ github.event.inputs.DEVICE_PATH }}/Image.gz-dtb"; echo "KERNEL_BUILD_RESULT=source" >> $GITHUB_ENV; break; }
@@ -287,7 +286,7 @@ jobs:
           Target: ${{ github.event.inputs.BUILD_TARGET }}
           Manifest: ${{ github.event.inputs.MANIFEST_BRANCH }}
           Date: ${{ env.BUILD_DATE }}
-          Commit: ${{ env.DEVICE_TREE_URL }}/commit/${{ env.COMMIT_ID }}
+          Commit: ${{ github.event.inputs.DEVICE_URL }}/commit/${{ env.COMMIT_ID }}
           MD5: ${{ env.MD5_IMG }}
           Compiler: LLVM/Clang 14
           Kernel: ${{ env.KERNEL_BUILD_RESULT }}
