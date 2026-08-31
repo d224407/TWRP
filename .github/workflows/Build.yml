@@ -40,12 +40,12 @@ on:
         required: true
         default: true
       KERNEL_SOURCE:
-        description: 'Kernel Source (optional) — leave blank to use the device tree default (prebuilt kernel)'
+        description: 'Kernel Source (optional)'
         required: false
         default: 'https://github.com/LineageOS/android_kernel_xiaomi_sdm845'
         type: string
       KERNEL_BRANCH:
-        description: 'Kernel Source Branch (optional) — leave blank to auto-detect from Manifest Branch, or clone the repo default branch'
+        description: 'Kernel Source Branch (optional)'
         required: false
         default: ''
         type: string
@@ -60,560 +60,236 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     permissions:
       contents: write
+
     steps:
-    - name: Check Out
-      uses: actions/checkout@main
+    - uses: actions/checkout@main
       
-    - name: Display Inputs
+    - name: Set Build Environment Variables
       run: |
         echo "KERNEL_BUILD_RESULT=prebuilt" >> $GITHUB_ENV
-        echo "Manifest Branch: ${{ github.event.inputs.MANIFEST_BRANCH }}"
-        echo "Device Tree: ${{ github.event.inputs.DEVICE_TREE }}"
-        echo "Device Path: ${{ github.event.inputs.DEVICE_PATH }}"
-        echo "Device Name: ${{ github.event.inputs.DEVICE_NAME }}"
-        echo "Build Target: ${{ github.event.inputs.BUILD_TARGET }}image"
-        echo "Kernel Source: ${{ github.event.inputs.KERNEL_SOURCE || '(none — use device tree default)' }}"
-        echo "Kernel Branch: ${{ github.event.inputs.KERNEL_BRANCH || '(auto/default)' }}"
+        echo "BUILD_DATE=$(date +%Y%m%d)" >> $GITHUB_ENV
+        DEVICE_TREE_URL="${{ github.event.inputs.DEVICE_TREE }}"
+        echo "DEVICE_TREE_URL=${DEVICE_TREE_URL%.git}" >> $GITHUB_ENV
 
-    - name: Cleanup
-      uses: rokibhasansagar/slimhub_actions@main
-      
-    - name: Set Swap Space
-      uses: pierotofy/set-swap-space@master
-      with:
-        swap-size-gb: 24
-        
-    - name: Prepare Environment
+    - name: System Cleanup & Dependencies
       run: |
-        sudo apt update
-        sudo apt -y upgrade
-        sudo apt -y install git-core gnupg flex bison build-essential zip curl \
-          zlib1g-dev libc6-dev-i386 x11proto-core-dev libx11-dev lib32z-dev \
-          libgl1-mesa-dev libxml2-utils xsltproc unzip fontconfig python3 python3-pip \
-          gperf gcc-multilib g++-multilib bc ccache liblz4-tool libncurses-dev \
-          libsdl1.2-dev lzop pngcrush schedtool squashfs-tools imagemagick \
-          libbz2-dev lzma ncftp qemu-user-static libstdc++-10-dev libgflags-dev \
-          clang-14 lld-14 llvm-14 libtinfo5 libncurses5
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc 2>/dev/null || true
+        sudo apt update && sudo apt -y upgrade
+        sudo apt -y install git-core gnupg flex bison build-essential zip curl zlib1g-dev \
+          libc6-dev-i386 x11proto-core-dev libx11-dev lib32z-1g-dev libgl1-mesa-dev \
+          libxml2-utils xsltproc unzip fontconfig python3 python3-pip gperf gcc-multilib \
+          g++-multilib bc ccache liblz4-tool libncurses-dev libsdl1.2-dev lzop pngcrush \
+          schedtool squashfs-tools imagemagick libbz2-dev lzma ncftp qemu-user-static \
+          libstdc++-10-dev libgflags-dev clang-14 lld-14 llvm-14 libtinfo5 libncurses5
 
-    - name: Setup LLVM/Clang
+    - name: Setup Toolchain & Git-Repo
       run: |
         sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 100
         sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-14 100
         sudo update-alternatives --install /usr/bin/ld ld /usr/bin/lld-14 100
-        export PATH=/usr/lib/llvm-14/bin:$PATH
         echo "PATH=/usr/lib/llvm-14/bin:$PATH" >> $GITHUB_ENV
-        clang --version
+        
+        mkdir -p ~/bin
+        curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+        chmod a+x ~/bin/repo
+        sudo ln -sf ~/bin/repo /usr/bin/repo
 
-    - name: Install Temurin
+    - name: Setup Java & Swap
+      run: |
+        java -version
       uses: actions/setup-java@main
       with:
         distribution: temurin
         java-version: 17
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 24
 
-    - name: Install Git-Repo
-      run: |
-        mkdir ~/bin
-        curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
-        chmod a+x ~/bin/repo
-        sudo ln -sf ~/bin/repo /usr/bin/repo
-
-    - name: Detect Manifest Branch
+    - name: Initialize & Sync Manifest
       run: |
         BRANCH="${{ github.event.inputs.MANIFEST_BRANCH }}"
         AOSP_URL="https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git"
         OMNI_URL="https://github.com/minimal-manifest-twrp/platform_manifest_twrp_omni.git"
         LOS_URL="https://github.com/minimal-manifest-twrp/platform_manifest_twrp_lineageos.git"
 
-        MANIFEST_URL=""
+        MANIFEST_URL="$OMNI_URL"
         MANIFEST_BRANCH_ARG=""
 
-        if [ -z "$BRANCH" ] || [ "$BRANCH" = "automatic" ]; then
-          echo "Automatic mode: using the Omni manifest's default branch"
-          MANIFEST_URL="$OMNI_URL"
-
-        elif [[ "$BRANCH" == "twrp-11" || "$BRANCH" == "twrp-12.1" ]]; then
+        if [[ "$BRANCH" == "twrp-11" || "$BRANCH" == "twrp-12.1" ]]; then
           MANIFEST_URL="$AOSP_URL"
           MANIFEST_BRANCH_ARG="$BRANCH"
-
         elif [[ "$BRANCH" == "twrp-14.1" ]]; then
-          # twrp-14.1 tracks LineageOS 14.1 (Android 7.1) and lives in its own repo, not the AOSP one
           MANIFEST_URL="$LOS_URL"
           MANIFEST_BRANCH_ARG="$BRANCH"
-
-        elif [[ "$BRANCH" =~ ^twrp-[0-9]+(\.[0-9]+)?$ ]]; then
-          # Any other explicit twrp-X.X (e.g. twrp-9.0, twrp-8.1) is an Omni-manifest branch
-          MANIFEST_URL="$OMNI_URL"
+        elif [[ "$BRANCH" =~ ^twrp-[0-9] ]]; then
           MANIFEST_BRANCH_ARG="$BRANCH"
-
-        elif [[ "$BRANCH" =~ ^lineage-([0-9]+)(\.[0-9]+)?$ ]]; then
-          LOS_MAJOR="${BASH_REMATCH[1]}"
-          echo "Detected LineageOS-style branch '$BRANCH' (major version $LOS_MAJOR) — mapping to a TWRP manifest..."
-          case "$LOS_MAJOR" in
-            14) MANIFEST_URL="$LOS_URL";  MANIFEST_BRANCH_ARG="twrp-14.1" ;;
-            15) MANIFEST_URL="$OMNI_URL"; MANIFEST_BRANCH_ARG="twrp-8.1" ;;
-            16) MANIFEST_URL="$OMNI_URL"; MANIFEST_BRANCH_ARG="twrp-9.0" ;;
-            17) MANIFEST_URL="$OMNI_URL"; MANIFEST_BRANCH_ARG="twrp-9.0" ;;
+        elif [[ "$BRANCH" =~ ^lineage-([0-9]+) ]]; then
+          case "${BASH_REMATCH[1]}" in
+            14) MANIFEST_URL="$LOS_URL"; MANIFEST_BRANCH_ARG="twrp-14.1" ;;
             18) MANIFEST_URL="$AOSP_URL"; MANIFEST_BRANCH_ARG="twrp-11" ;;
             19) MANIFEST_URL="$AOSP_URL"; MANIFEST_BRANCH_ARG="twrp-12.1" ;;
-            *)
-              echo "::warning::No official TWRP minimal-manifest branch exists yet for LineageOS ${LOS_MAJOR}.x — the project currently tops out at twrp-12.1 (Android 12.1). Falling back to twrp-12.1; the build may need manual device-tree fixes or may not succeed at all on this device generation."
-              MANIFEST_URL="$AOSP_URL"
-              MANIFEST_BRANCH_ARG="twrp-12.1"
-              ;;
+            *) MANIFEST_URL="$OMNI_URL"; MANIFEST_BRANCH_ARG="twrp-9.0" ;;
           esac
-
-        else
-          echo "Branch '$BRANCH' doesn't match a known pattern — passing it through to the Omni manifest as-is"
-          MANIFEST_URL="$OMNI_URL"
+        elif [[ "$BRANCH" != "automatic" ]]; then
           MANIFEST_BRANCH_ARG="$BRANCH"
         fi
 
-        echo "Resolved manifest: $MANIFEST_URL @ ${MANIFEST_BRANCH_ARG:-<default>}"
         echo "MANIFEST_URL=$MANIFEST_URL" >> $GITHUB_ENV
         echo "MANIFEST_BRANCH_ARG=$MANIFEST_BRANCH_ARG" >> $GITHUB_ENV
 
-    - name: Initialize Repo
-      run: |
-        mkdir workspace
-        cd workspace
+        mkdir -p workspace && cd workspace
         git config --global user.name "github-actions"
         git config --global user.email "github-actions@github.com"
-
-        if [ -z "${{ env.MANIFEST_BRANCH_ARG }}" ]; then
-          echo "Using default branch for manifest"
-          repo init --depth=1 -u ${{ env.MANIFEST_URL }}
+        
+        if [ -z "$MANIFEST_BRANCH_ARG" ]; then
+          repo init --depth=1 -u "$MANIFEST_URL"
         else
-          echo "Using branch: ${{ env.MANIFEST_BRANCH_ARG }}"
-          repo init --depth=1 -u ${{ env.MANIFEST_URL }} -b "${{ env.MANIFEST_BRANCH_ARG }}"
+          repo init --depth=1 -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH_ARG"
         fi
-  
-    - name: Repo Sync
-      run: |
-        cd workspace
+        
         repo sync -j$(nproc --all) --force-sync
 
     - name: Clone Device Tree
       run: |
         cd workspace
-        DEVICE_PATH="${{ github.event.inputs.DEVICE_PATH }}"
-        
-        echo "Cloning device tree (using default branch)..."
-        git clone --depth=1 "${{ github.event.inputs.DEVICE_TREE }}" "./$DEVICE_PATH"
-        cd $DEVICE_PATH
-        
-        echo "COMMIT_ID=$(git rev-parse HEAD)" >> $GITHUB_ENV
-        echo "Device tree cloned successfully"
+        git clone --depth=1 "${{ github.event.inputs.DEVICE_TREE }}" "./${{ github.event.inputs.DEVICE_PATH }}"
+        echo "COMMIT_ID=$(git -C ${{ github.event.inputs.DEVICE_PATH }} rev-parse HEAD)" >> $GITHUB_ENV
 
-    - name: Clone Kernel Source
+    - name: Clone & Build Kernel (Optional)
       if: github.event.inputs.KERNEL_SOURCE != ''
+      continue-on-error: true
       run: |
         cd workspace
-        KERNEL_SOURCE="${{ github.event.inputs.KERNEL_SOURCE }}"
         KERNEL_BRANCH="${{ github.event.inputs.KERNEL_BRANCH }}"
-
-        # Clone kernel source into its own directory, independent of any AOSP kernel-source hook —
-        # this device tree ships a prebuilt Image.gz-dtb blob, it has no kernel.mk integration at all.
-        KERNEL_SRC_DIR="kernel_src"
-        echo "KERNEL_SRC_DIR=$KERNEL_SRC_DIR" >> $GITHUB_ENV
-
+        
         if [ -z "$KERNEL_BRANCH" ] && [[ "${{ github.event.inputs.MANIFEST_BRANCH }}" =~ ^lineage- ]]; then
           KERNEL_BRANCH="${{ github.event.inputs.MANIFEST_BRANCH }}"
-          echo "No kernel branch specified, reusing manifest branch: $KERNEL_BRANCH"
         fi
-
+        
         if [ -z "$KERNEL_BRANCH" ]; then
-          echo "Cloning $KERNEL_SOURCE (default branch) into $KERNEL_SRC_DIR"
-          git clone --depth=1 "$KERNEL_SOURCE" "$KERNEL_SRC_DIR"
+          git clone --depth=1 "${{ github.event.inputs.KERNEL_SOURCE }}" "kernel_src"
         else
-          echo "Cloning $KERNEL_SOURCE (branch: $KERNEL_BRANCH) into $KERNEL_SRC_DIR"
-          git clone --depth=1 -b "$KERNEL_BRANCH" "$KERNEL_SOURCE" "$KERNEL_SRC_DIR" || {
-            echo "::warning::Branch '$KERNEL_BRANCH' not found in $KERNEL_SOURCE, falling back to the repo's default branch"
-            git clone --depth=1 "$KERNEL_SOURCE" "$KERNEL_SRC_DIR"
-          }
+          git clone --depth=1 -b "$KERNEL_BRANCH" "${{ github.event.inputs.KERNEL_SOURCE }}" "kernel_src" 2>/dev/null || \
+          git clone --depth=1 "${{ github.event.inputs.KERNEL_SOURCE }}" "kernel_src"
         fi
-
-    - name: Auto-detect Kernel Build Config
-      if: github.event.inputs.KERNEL_SOURCE != ''
-      run: |
-        cd workspace/${{ env.KERNEL_SRC_DIR }}
-        DEVICE_NAME="${{ github.event.inputs.DEVICE_NAME }}"
-        BOARD_CONFIG="../${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk"
-
-        KERNEL_ARCH=$(grep -oP '(?<=^TARGET_ARCH := ).*' "$BOARD_CONFIG" | head -n1)
-        [ -z "$KERNEL_ARCH" ] && KERNEL_ARCH="arm64"
-        BOARD_PLATFORM=$(grep -oP '(?<=^TARGET_BOARD_PLATFORM := ).*' "$BOARD_CONFIG" | head -n1)
-        echo "Detected arch: $KERNEL_ARCH, platform: ${BOARD_PLATFORM:-<none>}"
-
-        CONFIG_DIR="arch/$KERNEL_ARCH/configs"
-        if [ ! -d "$CONFIG_DIR" ]; then
-          echo "::error::No $CONFIG_DIR directory in the kernel source — cannot auto-detect a defconfig."
-          echo "SKIP_KERNEL_BUILD=true" >> $GITHUB_ENV
-          exit 0
-        fi
-
-        # Try device codename first, then board platform, in that order
-        DEFCONFIG=""
-        for pattern in "$DEVICE_NAME" "$BOARD_PLATFORM"; do
-          [ -z "$pattern" ] && continue
-          MATCH=$(find "$CONFIG_DIR" -maxdepth 1 -iname "*${pattern}*defconfig*" | sort | head -n1)
-          if [ -n "$MATCH" ]; then
-            DEFCONFIG=$(basename "$MATCH")
-            echo "Matched defconfig for '$pattern': $DEFCONFIG"
-            break
-          fi
-        done
-
-        if [ -z "$DEFCONFIG" ]; then
-          echo "::warning::Could not auto-match a defconfig for '$DEVICE_NAME' / '$BOARD_PLATFORM'. Available defconfigs:"
-          find "$CONFIG_DIR" -maxdepth 1 -iname "*defconfig*" -printf '  %f\n'
-          echo "SKIP_KERNEL_BUILD=true" >> $GITHUB_ENV
-          exit 0
-        fi
-
-        echo "KERNEL_ARCH=$KERNEL_ARCH" >> $GITHUB_ENV
-        echo "KERNEL_DEFCONFIG=$DEFCONFIG" >> $GITHUB_ENV
-        echo "SKIP_KERNEL_BUILD=false" >> $GITHUB_ENV
-
-    - name: Build Kernel From Source
-      if: github.event.inputs.KERNEL_SOURCE != '' && env.SKIP_KERNEL_BUILD == 'false'
-      run: |
+        
+        [ ! -d kernel_src ] && exit 0
+        
+        BOARD_CONFIG="${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk"
+        KERNEL_ARCH=$(grep -oP '(?<=^TARGET_ARCH := ).*' "$BOARD_CONFIG" 2>/dev/null || echo "arm64")
+        CONFIG_DIR="kernel_src/arch/$KERNEL_ARCH/configs"
+        
+        [ ! -d "$CONFIG_DIR" ] && exit 0
+        
+        DEFCONFIG=$(find "$CONFIG_DIR" -maxdepth 1 -iname "*${{ github.event.inputs.DEVICE_NAME }}*defconfig*" -o -iname "*defconfig*" | head -n1)
+        [ -z "$DEFCONFIG" ] && exit 0
+        
         sudo apt -y install gcc-aarch64-linux-gnu g++-aarch64-linux-gnu bc
-
-        cd workspace/${{ env.KERNEL_SRC_DIR }}
-        export ARCH=${{ env.KERNEL_ARCH }}
-        export CROSS_COMPILE=aarch64-linux-gnu-
-        export PATH=/usr/lib/llvm-14/bin:$PATH
-        export CC=clang
-
-        echo "Building kernel: ARCH=$ARCH, defconfig=${{ env.KERNEL_DEFCONFIG }}, CC=$CC, CROSS_COMPILE=$CROSS_COMPILE"
-        make O=out ${{ env.KERNEL_DEFCONFIG }}
-        DEFCONFIG_STATUS=$?
-        if [ "$DEFCONFIG_STATUS" -ne 0 ]; then
-          echo "::warning::Failed to apply defconfig '${{ env.KERNEL_DEFCONFIG }}' (exit $DEFCONFIG_STATUS). Falling back to the device tree's original prebuilt kernel (device/.../Image.gz-dtb, untouched)."
-          exit 0
-        fi
-
-        make O=out -j$(nproc --all) 2>&1 | tee /tmp/kernel_build.log
-        BUILD_STATUS=${PIPESTATUS[0]}
-        if [ "$BUILD_STATUS" -ne 0 ]; then
-          echo "::warning::Kernel build failed (exit $BUILD_STATUS) — see log lines above for the actual compiler/linker error. Falling back to the device tree's original prebuilt kernel (device/.../Image.gz-dtb, untouched)."
-          exit 0
-        fi
-
-        # Auto-detect whichever boot image artifact the kernel Makefile actually produced
-        BOOT_DIR="out/arch/${{ env.KERNEL_ARCH }}/boot"
-        OUT_IMG=""
-        for cand in "$BOOT_DIR/Image.gz-dtb" "$BOOT_DIR/Image.gz" "$BOOT_DIR/Image"; do
-          if [ -f "$cand" ]; then
-            OUT_IMG="$cand"
-            echo "Found kernel artifact: $cand"
-            break
-          fi
+        
+        cd kernel_src
+        export ARCH=$KERNEL_ARCH CROSS_COMPILE=aarch64-linux-gnu- CC=clang PATH=/usr/lib/llvm-14/bin:$PATH
+        
+        make O=out $(basename "$DEFCONFIG") 2>/dev/null
+        make O=out -j$(nproc --all) 2>&1 | tail -20
+        
+        for img in out/arch/$KERNEL_ARCH/boot/Image.gz-dtb out/arch/$KERNEL_ARCH/boot/Image.gz out/arch/$KERNEL_ARCH/boot/Image; do
+          [ -f "$img" ] && { cp "$img" "../${{ github.event.inputs.DEVICE_PATH }}/Image.gz-dtb"; echo "KERNEL_BUILD_RESULT=source" >> $GITHUB_ENV; break; }
         done
 
-        if [ -z "$OUT_IMG" ]; then
-          echo "::warning::Kernel build succeeded but no image found under $BOOT_DIR (checked Image.gz-dtb, Image.gz, Image). Falling back to the device tree's original prebuilt kernel. Files that were produced:"
-          find "$BOOT_DIR" -maxdepth 1 -type f
-          exit 0
-        fi
-
-        if [ "$(basename "$OUT_IMG")" != "Image.gz-dtb" ]; then
-          echo "::warning::Kernel Makefile produced $(basename "$OUT_IMG"), not a DTB-appended Image.gz-dtb. If this device needs an appended DTB, the recovery may fail to boot — check this kernel tree's defconfig for CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE."
-        fi
-
-        cp "$OUT_IMG" "../${{ github.event.inputs.DEVICE_PATH }}/Image.gz-dtb"
-        echo "Copied built kernel over device/.../Image.gz-dtb (TARGET_PREBUILT_KERNEL already points here — no BoardConfig.mk changes needed)"
-        echo "KERNEL_BUILD_RESULT=source" >> $GITHUB_ENV
-
-    - name: Fix empty dependencies file
+    - name: Prepare Build
       run: |
         cd workspace
         DEVICE_PATH="${{ github.event.inputs.DEVICE_PATH }}"
+        DEVICE_NAME="${{ github.event.inputs.DEVICE_NAME }}"
         
-        echo "Checking for empty dependencies files in $DEVICE_PATH"
+        # Fix empty dependencies & create default if missing
+        find "$DEVICE_PATH" -name "*.dependencies" -size 0 -exec echo '[]' \; > {} \;
+        [ ! -f "$DEVICE_PATH/omni.dependencies" ] && echo '[]' > "$DEVICE_PATH/omni.dependencies"
         
-        find $DEVICE_PATH -name "*.dependencies" -type f 2>/dev/null | while read file; do
-          if [ ! -s "$file" ]; then
-            echo "File $file is empty, creating valid JSON"
-            echo '[]' > "$file"
-          fi
-        done
-        
-        if [ -z "$(find $DEVICE_PATH -name "*.dependencies" -type f 2>/dev/null)" ]; then
-          echo "No dependencies file found, creating omni.dependencies"
-          echo '[]' > $DEVICE_PATH/omni.dependencies
-        fi
-
-    - name: Create embedded.mk
-      run: |
-        cd workspace
-        if [ ! -f build/target/product/embedded.mk ]; then
-          mkdir -p build/target/product
-          cat > build/target/product/embedded.mk << 'EOF'
-        PRODUCT_PACKAGES += \
-            debuggerd \
-            init \
-            sh \
-            shell \
-            toolbox \
-            fsck.f2fs \
-            mkfs.f2fs \
-            e2fsck \
-            mke2fs \
-            tune2fs \
-            adb \
-            fastboot \
-            recovery \
-            twrp \
-            mount \
-            umount \
-            dd \
-            blkid \
-            fdisk \
-            parted
+        # Ensure embedded.mk exists
+        mkdir -p build/target/product
+        cat > build/target/product/embedded.mk << 'EOF'
+        PRODUCT_PACKAGES += debuggerd init sh shell toolbox fsck.f2fs mkfs.f2fs \
+            e2fsck mke2fs tune2fs adb fastboot recovery twrp mount umount dd blkid fdisk parted
         EOF
-        fi
         
-        if [ ! -f build/make/target/product/embedded.mk ] && [ -f build/target/product/embedded.mk ]; then
-          mkdir -p build/make/target/product
-          ln -sf ../../../build/target/product/embedded.mk build/make/target/product/embedded.mk
-        fi
+        # Find device makefile
+        for mk in twrp_${DEVICE_NAME} omni_${DEVICE_NAME} device_${DEVICE_NAME}; do
+          [ -f "$DEVICE_PATH/${mk}.mk" ] && { echo "DEVICE_MAKEFILE=$mk" >> $GITHUB_ENV; break; }
+        done || { echo "::error::No makefile found"; exit 1; }
+        
+        # Clean obsolete flags
+        [ -f "$DEVICE_PATH/BoardConfig.mk" ] && sed -i '/USE_CLANG_PLATFORM_BUILD\|TARGET_USE_CLANG\|TARGET_USE_GCC\|TARGET_USE_CLANG_LLD/d' "$DEVICE_PATH/BoardConfig.mk"
+        
+        # Apply patches
+        [ -f ../common_patch.txt ] && { echo -e "\n# Common patches" >> "$DEVICE_PATH/BoardConfig.mk"; cat ../common_patch.txt >> "$DEVICE_PATH/BoardConfig.mk"; }
+        [ -f ../patch.txt ] && {
+          PATCH=$(awk -v dev="$DEVICE_NAME" '/^# Device:/ {found=($3==dev); next} found && NF {print}' ../patch.txt)
+          [ -n "$PATCH" ] && { echo -e "\n# Device patch" >> "$DEVICE_PATH/BoardConfig.mk"; echo "$PATCH" >> "$DEVICE_PATH/BoardConfig.mk"; }
+        }
+        
+        # Fix version defaults
+        [ -f build/make/core/version_defaults.mk ] && ! grep -q "PLATFORM_VERSION_ALL_CODENAMES" build/make/core/version_defaults.mk && \
+          sed -i '/PLATFORM_VERSION_CODENAME/a PLATFORM_VERSION_ALL_CODENAMES := REL' build/make/core/version_defaults.mk
+        
+        # Install Python 2 for older builds
+        [[ ! "${{ env.MANIFEST_BRANCH_ARG }}" =~ twrp-(11|12\.1|14\.1) ]] && { sudo apt -y install python2 2>/dev/null || true; [ ! -L /usr/bin/python ] && sudo ln -sf /usr/bin/python2 /usr/bin/python; }
 
-    - name: Check Build Makefile
-      run: |
-        cd workspace
-        DEVICE_PATH="${{ github.event.inputs.DEVICE_PATH }}"
-        DEVICE_NAME="${{ github.event.inputs.DEVICE_NAME }}"
-        
-        if [ -f $DEVICE_PATH/twrp_$DEVICE_NAME.mk ]; then
-            echo "DEVICE_MAKEFILE=twrp_$DEVICE_NAME" >> $GITHUB_ENV
-        elif [ -f $DEVICE_PATH/omni_$DEVICE_NAME.mk ]; then
-            echo "DEVICE_MAKEFILE=omni_$DEVICE_NAME" >> $GITHUB_ENV
-        elif [ -f $DEVICE_PATH/device_$DEVICE_NAME.mk ]; then
-            echo "DEVICE_MAKEFILE=device_$DEVICE_NAME" >> $GITHUB_ENV
-        else
-            echo "No recovery makefile found"
-            exit 1
-        fi
-      
-    - name: Install Python 2 (Legacy Build Scripts)
-      if: env.MANIFEST_BRANCH_ARG != 'twrp-11' && env.MANIFEST_BRANCH_ARG != 'twrp-12.1' && env.MANIFEST_BRANCH_ARG != 'twrp-14.1'
-      run: |
-        sudo add-apt-repository universe -y
-        sudo apt update
-        sudo apt install -y python2
-        sudo ln -sf /usr/bin/python2 /usr/bin/python
-        python --version
-
-    - name: Clean Obsolete Compiler Flags
-      run: |
-        cd workspace
-        if [ -f ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk ]; then
-          echo "Cleaning obsolete compiler flags from BoardConfig.mk..."
-          sed -i '/USE_CLANG_PLATFORM_BUILD/d' ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk
-          sed -i '/TARGET_USE_CLANG/d' ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk
-          sed -i '/TARGET_USE_GCC/d' ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk
-          sed -i '/TARGET_USE_CLANG_LLD/d' ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk
-          echo "BoardConfig.mk cleaned"
-        fi
-
-    - name: Apply common patches from common_patch.txt
-      run: |
-        cd workspace
-        COMMON_PATCH_FILE="../common_patch.txt"
-        
-        if [ ! -f "$COMMON_PATCH_FILE" ]; then
-          echo "common_patch.txt not found, skipping common patches"
-          exit 0
-        fi
-        
-        echo "Applying common patches from common_patch.txt..."
-        
-        if [ -f ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk ]; then
-          echo -e "\n# Common patches from common_patch.txt" >> ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk
-          cat "$COMMON_PATCH_FILE" >> ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk
-          echo "Common patches applied to BoardConfig.mk"
-        else
-          echo "BoardConfig.mk not found, cannot apply common patches"
-          exit 1
-        fi
-
-    - name: Apply device-specific patches from patch.txt
-      run: |
-        cd workspace
-        DEVICE_NAME="${{ github.event.inputs.DEVICE_NAME }}"
-        PATCH_FILE="../patch.txt"
-        
-        if [ ! -f "$PATCH_FILE" ]; then
-          echo "patch.txt not found, skipping device-specific patches"
-          exit 0
-        fi
-        
-        echo "Searching patch for device: $DEVICE_NAME"
-        
-        awk -v dev="$DEVICE_NAME" '
-          BEGIN { found=0; patch=""; current="" }
-          /^# Device:/ { 
-            current = $3
-            if (current == dev) { found=1; next }
-            if (found) exit
-            next
-          }
-          found && !/^#/ && NF > 0 {
-            patch = patch $0 "\n"
-          }
-          END { if (patch != "") print patch }
-        ' "$PATCH_FILE" > /tmp/device_patch.txt
-        
-        if [ -s /tmp/device_patch.txt ]; then
-          echo "Found patch for device: $DEVICE_NAME"
-          echo "Patch content:"
-          cat /tmp/device_patch.txt
-          
-          if [ -f ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk ]; then
-            echo -e "\n# Device-specific patch from patch.txt" >> ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk
-            cat /tmp/device_patch.txt >> ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk
-            echo "Device-specific patch applied to BoardConfig.mk"
-          else
-            echo "BoardConfig.mk not found, cannot apply device-specific patch"
-            exit 1
-          fi
-        else
-          echo "No patch found for device: $DEVICE_NAME"
-        fi
-
-    - name: Fix PLATFORM_VERSION_ALL_CODENAMES (common)
-      run: |
-        cd workspace
-        if [ -f build/make/core/version_defaults.mk ]; then
-          if ! grep -q "PLATFORM_VERSION_ALL_CODENAMES" build/make/core/version_defaults.mk; then
-            echo "Adding PLATFORM_VERSION_ALL_CODENAMES to version_defaults.mk"
-            sed -i '/PLATFORM_VERSION_CODENAME/a PLATFORM_VERSION_ALL_CODENAMES := REL' build/make/core/version_defaults.mk
-          fi
-        fi
-
-    - name: Relax link_type Enforcement (Legacy Branches)
-      if: env.MANIFEST_BRANCH_ARG != 'twrp-11' && env.MANIFEST_BRANCH_ARG != 'twrp-12.1' && env.MANIFEST_BRANCH_ARG != 'twrp-14.1'
-      run: |
-        cd workspace
-        for f in build/core/link_type.mk build/make/core/link_type.mk; do
-          if [ -f "$f" ]; then
-            echo "Relaxing link_type enforcement in $f"
-            cp "$f" "$f.bak"
-            sed -i -E 's#^(\s*)(\$\(hide\)\s*.*check_link_type\.py.*)$#\1\2 || true; touch $@#' "$f"
-            if diff -q "$f" "$f.bak" >/dev/null; then
-              echo "WARNING: no check_link_type.py line matched in $f, enforcement unchanged"
-            fi
-            rm -f "$f.bak"
-          fi
-        done
-
-    - name: Build Image 
-      id: build
+    - name: Build Recovery Image
       run: |
         cd workspace
         export PATH=/usr/lib/llvm-14/bin:$PATH
-        export CC=clang
-        export CXX=clang++
-        export LD=ld.lld
-        export AR=llvm-ar
-        export NM=llvm-nm
-        export STRIP=llvm-strip
-        export OBJCOPY=llvm-objcopy
-        export OBJDUMP=llvm-objdump
-        export READELF=llvm-readelf
+        export CC=clang CXX=clang++ LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf
         
         source build/envsetup.sh
-        export ALLOW_MISSING_DEPENDENCIES=true
-        export TARGET_USES_MKE2FS=true
-        export SKIP_ABI_CHECKS=true
-        export WITH_TWRP_SWIPE=true
-        export BUILD_NUMBER=$(date +%s)
+        export ALLOW_MISSING_DEPENDENCIES=true TARGET_USES_MKE2FS=true SKIP_ABI_CHECKS=true WITH_TWRP_SWIPE=true BUILD_NUMBER=$(date +%s)
         
         lunch ${{ env.DEVICE_MAKEFILE }}-eng
         make clobber
-        make clean
         make ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all)
-      
-    - name: Set Build Date
-      run: |
-        echo "BUILD_DATE=$(date +%Y%m%d)" >> $GITHUB_ENV
-        DEVICE_TREE_URL="${{ github.event.inputs.DEVICE_TREE }}"
-        if [[ "${DEVICE_TREE_URL}" == *.git ]]; then
-          DEVICE_TREE_URL="${DEVICE_TREE_URL%.git}"
-        fi
-        echo "DEVICE_TREE_URL=${DEVICE_TREE_URL}" >> $GITHUB_ENV
 
-    - name: Check Recovery Image
+    - name: Prepare Release Assets
       run: |
-        cd workspace
         DEVICE_NAME="${{ github.event.inputs.DEVICE_NAME }}"
-        BUILD_TARGET="${{ github.event.inputs.BUILD_TARGET }}"
+        OUT="workspace/out/target/product/$DEVICE_NAME"
         
-        if [ -f out/target/product/$DEVICE_NAME/recovery.img ]; then
-            echo "RECOVERY_TYPE=recovery" >> $GITHUB_ENV
-            echo "MD5_IMG=$(md5sum out/target/product/$DEVICE_NAME/recovery.img | cut -d ' ' -f 1)" >> $GITHUB_ENV
-        elif [ -f out/target/product/$DEVICE_NAME/boot.img ]; then
-            echo "RECOVERY_TYPE=boot" >> $GITHUB_ENV
-            echo "MD5_IMG=$(md5sum out/target/product/$DEVICE_NAME/boot.img | cut -d ' ' -f 1)" >> $GITHUB_ENV
-        elif [ -f out/target/product/$DEVICE_NAME/vendor_boot.img ]; then
-            echo "RECOVERY_TYPE=vendor_boot" >> $GITHUB_ENV
-            echo "MD5_IMG=$(md5sum out/target/product/$DEVICE_NAME/vendor_boot.img | cut -d ' ' -f 1)" >> $GITHUB_ENV
-        else
-            echo "No recovery image found"
-            exit 1
-        fi
+        # Detect image type
+        for img in recovery.img boot.img vendor_boot.img; do
+          [ -f "$OUT/$img" ] && { echo "RECOVERY_TYPE=${img%.img}" >> $GITHUB_ENV; break; }
+        done || { echo "::error::No recovery image"; exit 1; }
+        
+        echo "MD5_IMG=$(md5sum $OUT/${{ env.RECOVERY_TYPE }}.img | cut -d' ' -f1)" >> $GITHUB_ENV
+        
+        # Optional: Add installer
+        [ "${{ github.event.inputs.RECOVERY_INSTALLER }}" = "true" ] && {
+          cd "$OUT"
+          wget -q https://github.com/kinguser981/recovery-installer/releases/download/zip/recovery-installer.zip 2>/dev/null || true
+          zip -ur recovery-installer.zip ${{ env.RECOVERY_TYPE }}.img 2>/dev/null || true
+        }
+        
+        # Optional: Create tar
+        [ "${{ github.event.inputs.RECOVERY_TAR }}" = "true" ] && {
+          cd "$OUT"
+          tar -cf ${{ env.RECOVERY_TYPE }}.tar ${{ env.RECOVERY_TYPE }}.img 2>/dev/null || true
+        }
 
-    - name: Include Recovery Installer
-      run: |
-        if [ ${{ github.event.inputs.RECOVERY_INSTALLER }} = true ]; then
-          cd workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/
-          wget https://github.com/kinguser981/recovery-installer/releases/download/zip/recovery-installer.zip
-          zip -ur recovery-installer.zip ${{ env.RECOVERY_TYPE }}.img
-        fi
-      continue-on-error: true
-        
-    - name: Recovery to tar
-      run: |
-        if [ ${{ github.event.inputs.RECOVERY_TAR }} = true ]; then
-          cd workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/
-          tar -cvf ${{ env.RECOVERY_TYPE }}.tar ${{ env.RECOVERY_TYPE }}.img
-        fi
-      continue-on-error: true
-        
-    - name: Upload to Release
+    - name: Upload Release
       uses: softprops/action-gh-release@master
       with:
         files: |
+          workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/${{ env.RECOVERY_TYPE }}.img
           workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/${{ env.RECOVERY_TYPE }}.tar
           workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/recovery-installer.zip
-          workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/${{ env.RECOVERY_TYPE }}.img
         name: TWRP for ${{ github.event.inputs.DEVICE_NAME }} - ${{ env.BUILD_DATE }}
         tag_name: ${{ github.run_id }}
         body: |
+          **Build Info**
           Device: ${{ github.event.inputs.DEVICE_NAME }}
-          Target: ${{ github.event.inputs.BUILD_TARGET }}.img
+          Target: ${{ github.event.inputs.BUILD_TARGET }}
           Manifest: ${{ github.event.inputs.MANIFEST_BRANCH }}
-          Build Date: ${{ env.BUILD_DATE }}
+          Date: ${{ env.BUILD_DATE }}
           Commit: ${{ env.DEVICE_TREE_URL }}/commit/${{ env.COMMIT_ID }}
           MD5: ${{ env.MD5_IMG }}
           Compiler: LLVM/Clang 14
           Kernel: ${{ env.KERNEL_BUILD_RESULT }}
-
-    - name: Release
-      uses: softprops/action-gh-release@4634c16e79c963813287e889244c50009e7f0981
-      with:
-        files: |
-          workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/obj/PACKAGING/vendor_ramdisk_fragments_intermediates/recovery.*
-          workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/ramdisk-recovery.*
-        name: TWRP for ${{ github.event.inputs.DEVICE_NAME }} - ${{ env.BUILD_DATE }}
-        tag_name: ${{ github.run_id }}
-        body: |
-          Device: ${{ github.event.inputs.DEVICE_NAME }}
-          Target: ${{ github.event.inputs.BUILD_TARGET }}.img
-          Manifest: ${{ github.event.inputs.MANIFEST_BRANCH }}
-          Build Date: ${{ env.BUILD_DATE }}
-          Commit: ${{ env.DEVICE_TREE_URL }}/commit/${{ env.COMMIT_ID }}
-          MD5: ${{ env.MD5_IMG }}
-          Compiler: LLVM/Clang 14
-          Kernel: ${{ env.KERNEL_BUILD_RESULT }}
+      continue-on-error: true
