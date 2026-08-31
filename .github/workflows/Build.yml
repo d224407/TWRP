@@ -66,6 +66,7 @@ jobs:
       
     - name: Display Inputs
       run: |
+        echo "KERNEL_BUILD_RESULT=prebuilt" >> $GITHUB_ENV
         echo "Manifest Branch: ${{ github.event.inputs.MANIFEST_BRANCH }}"
         echo "Device Tree: ${{ github.event.inputs.DEVICE_TREE }}"
         echo "Device Path: ${{ github.event.inputs.DEVICE_PATH }}"
@@ -209,45 +210,120 @@ jobs:
         cd workspace
         KERNEL_SOURCE="${{ github.event.inputs.KERNEL_SOURCE }}"
         KERNEL_BRANCH="${{ github.event.inputs.KERNEL_BRANCH }}"
-        BOARD_CONFIG="${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk"
 
-        if [ ! -f "$BOARD_CONFIG" ]; then
-          echo "BoardConfig.mk not found, cannot configure kernel source"
-          exit 1
-        fi
+        # Clone kernel source into its own directory, independent of any AOSP kernel-source hook —
+        # this device tree ships a prebuilt Image.gz-dtb blob, it has no kernel.mk integration at all.
+        KERNEL_SRC_DIR="kernel_src"
+        echo "KERNEL_SRC_DIR=$KERNEL_SRC_DIR" >> $GITHUB_ENV
 
-        # Reuse whatever kernel path the device tree already declares; otherwise fall back to a sane default
-        KERNEL_PATH=$(grep -oP '(?<=TARGET_KERNEL_SOURCE := ).*' "$BOARD_CONFIG" | head -n1 || true)
-        if [ -z "$KERNEL_PATH" ]; then
-          KERNEL_PATH="kernel/xiaomi/sdm845"
-          echo "TARGET_KERNEL_SOURCE not found in BoardConfig.mk, defaulting kernel path to $KERNEL_PATH"
-        else
-          echo "Using kernel path declared in BoardConfig.mk: $KERNEL_PATH"
-        fi
-        echo "KERNEL_PATH=$KERNEL_PATH" >> $GITHUB_ENV
-
-        # If no branch was given, try to reuse the resolved manifest branch when it looks like a LineageOS version
         if [ -z "$KERNEL_BRANCH" ] && [[ "${{ github.event.inputs.MANIFEST_BRANCH }}" =~ ^lineage- ]]; then
           KERNEL_BRANCH="${{ github.event.inputs.MANIFEST_BRANCH }}"
           echo "No kernel branch specified, reusing manifest branch: $KERNEL_BRANCH"
         fi
 
         if [ -z "$KERNEL_BRANCH" ]; then
-          echo "Cloning $KERNEL_SOURCE (default branch) into $KERNEL_PATH"
-          git clone --depth=1 "$KERNEL_SOURCE" "$KERNEL_PATH"
+          echo "Cloning $KERNEL_SOURCE (default branch) into $KERNEL_SRC_DIR"
+          git clone --depth=1 "$KERNEL_SOURCE" "$KERNEL_SRC_DIR"
         else
-          echo "Cloning $KERNEL_SOURCE (branch: $KERNEL_BRANCH) into $KERNEL_PATH"
-          git clone --depth=1 -b "$KERNEL_BRANCH" "$KERNEL_SOURCE" "$KERNEL_PATH" || {
+          echo "Cloning $KERNEL_SOURCE (branch: $KERNEL_BRANCH) into $KERNEL_SRC_DIR"
+          git clone --depth=1 -b "$KERNEL_BRANCH" "$KERNEL_SOURCE" "$KERNEL_SRC_DIR" || {
             echo "::warning::Branch '$KERNEL_BRANCH' not found in $KERNEL_SOURCE, falling back to the repo's default branch"
-            git clone --depth=1 "$KERNEL_SOURCE" "$KERNEL_PATH"
+            git clone --depth=1 "$KERNEL_SOURCE" "$KERNEL_SRC_DIR"
           }
         fi
 
-        # Force the device tree to build the kernel from source instead of using a prebuilt binary
-        sed -i '/TARGET_PREBUILT_KERNEL/d' "$BOARD_CONFIG"
-        sed -i '/TARGET_KERNEL_SOURCE/d' "$BOARD_CONFIG"
-        echo "TARGET_KERNEL_SOURCE := $KERNEL_PATH" >> "$BOARD_CONFIG"
-        echo "Kernel source configured for build-from-source"
+    - name: Auto-detect Kernel Build Config
+      if: github.event.inputs.KERNEL_SOURCE != ''
+      run: |
+        cd workspace/${{ env.KERNEL_SRC_DIR }}
+        DEVICE_NAME="${{ github.event.inputs.DEVICE_NAME }}"
+        BOARD_CONFIG="../${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk"
+
+        KERNEL_ARCH=$(grep -oP '(?<=^TARGET_ARCH := ).*' "$BOARD_CONFIG" | head -n1)
+        [ -z "$KERNEL_ARCH" ] && KERNEL_ARCH="arm64"
+        BOARD_PLATFORM=$(grep -oP '(?<=^TARGET_BOARD_PLATFORM := ).*' "$BOARD_CONFIG" | head -n1)
+        echo "Detected arch: $KERNEL_ARCH, platform: ${BOARD_PLATFORM:-<none>}"
+
+        CONFIG_DIR="arch/$KERNEL_ARCH/configs"
+        if [ ! -d "$CONFIG_DIR" ]; then
+          echo "::error::No $CONFIG_DIR directory in the kernel source — cannot auto-detect a defconfig."
+          echo "SKIP_KERNEL_BUILD=true" >> $GITHUB_ENV
+          exit 0
+        fi
+
+        # Try device codename first, then board platform, in that order
+        DEFCONFIG=""
+        for pattern in "$DEVICE_NAME" "$BOARD_PLATFORM"; do
+          [ -z "$pattern" ] && continue
+          MATCH=$(find "$CONFIG_DIR" -maxdepth 1 -iname "*${pattern}*defconfig*" | sort | head -n1)
+          if [ -n "$MATCH" ]; then
+            DEFCONFIG=$(basename "$MATCH")
+            echo "Matched defconfig for '$pattern': $DEFCONFIG"
+            break
+          fi
+        done
+
+        if [ -z "$DEFCONFIG" ]; then
+          echo "::warning::Could not auto-match a defconfig for '$DEVICE_NAME' / '$BOARD_PLATFORM'. Available defconfigs:"
+          find "$CONFIG_DIR" -maxdepth 1 -iname "*defconfig*" -printf '  %f\n'
+          echo "SKIP_KERNEL_BUILD=true" >> $GITHUB_ENV
+          exit 0
+        fi
+
+        echo "KERNEL_ARCH=$KERNEL_ARCH" >> $GITHUB_ENV
+        echo "KERNEL_DEFCONFIG=$DEFCONFIG" >> $GITHUB_ENV
+        echo "SKIP_KERNEL_BUILD=false" >> $GITHUB_ENV
+
+    - name: Build Kernel From Source
+      if: github.event.inputs.KERNEL_SOURCE != '' && env.SKIP_KERNEL_BUILD == 'false'
+      run: |
+        sudo apt -y install gcc-aarch64-linux-gnu g++-aarch64-linux-gnu bc
+
+        cd workspace/${{ env.KERNEL_SRC_DIR }}
+        export ARCH=${{ env.KERNEL_ARCH }}
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export PATH=/usr/lib/llvm-14/bin:$PATH
+        export CC=clang
+
+        echo "Building kernel: ARCH=$ARCH, defconfig=${{ env.KERNEL_DEFCONFIG }}, CC=$CC, CROSS_COMPILE=$CROSS_COMPILE"
+        make O=out ${{ env.KERNEL_DEFCONFIG }}
+        DEFCONFIG_STATUS=$?
+        if [ "$DEFCONFIG_STATUS" -ne 0 ]; then
+          echo "::warning::Failed to apply defconfig '${{ env.KERNEL_DEFCONFIG }}' (exit $DEFCONFIG_STATUS). Falling back to the device tree's original prebuilt kernel (device/.../Image.gz-dtb, untouched)."
+          exit 0
+        fi
+
+        make O=out -j$(nproc --all) 2>&1 | tee /tmp/kernel_build.log
+        BUILD_STATUS=${PIPESTATUS[0]}
+        if [ "$BUILD_STATUS" -ne 0 ]; then
+          echo "::warning::Kernel build failed (exit $BUILD_STATUS) — see log lines above for the actual compiler/linker error. Falling back to the device tree's original prebuilt kernel (device/.../Image.gz-dtb, untouched)."
+          exit 0
+        fi
+
+        # Auto-detect whichever boot image artifact the kernel Makefile actually produced
+        BOOT_DIR="out/arch/${{ env.KERNEL_ARCH }}/boot"
+        OUT_IMG=""
+        for cand in "$BOOT_DIR/Image.gz-dtb" "$BOOT_DIR/Image.gz" "$BOOT_DIR/Image"; do
+          if [ -f "$cand" ]; then
+            OUT_IMG="$cand"
+            echo "Found kernel artifact: $cand"
+            break
+          fi
+        done
+
+        if [ -z "$OUT_IMG" ]; then
+          echo "::warning::Kernel build succeeded but no image found under $BOOT_DIR (checked Image.gz-dtb, Image.gz, Image). Falling back to the device tree's original prebuilt kernel. Files that were produced:"
+          find "$BOOT_DIR" -maxdepth 1 -type f
+          exit 0
+        fi
+
+        if [ "$(basename "$OUT_IMG")" != "Image.gz-dtb" ]; then
+          echo "::warning::Kernel Makefile produced $(basename "$OUT_IMG"), not a DTB-appended Image.gz-dtb. If this device needs an appended DTB, the recovery may fail to boot — check this kernel tree's defconfig for CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE."
+        fi
+
+        cp "$OUT_IMG" "../${{ github.event.inputs.DEVICE_PATH }}/Image.gz-dtb"
+        echo "Copied built kernel over device/.../Image.gz-dtb (TARGET_PREBUILT_KERNEL already points here — no BoardConfig.mk changes needed)"
+        echo "KERNEL_BUILD_RESULT=source" >> $GITHUB_ENV
 
     - name: Fix empty dependencies file
       run: |
@@ -522,6 +598,7 @@ jobs:
           Commit: ${{ env.DEVICE_TREE_URL }}/commit/${{ env.COMMIT_ID }}
           MD5: ${{ env.MD5_IMG }}
           Compiler: LLVM/Clang 14
+          Kernel: ${{ env.KERNEL_BUILD_RESULT }}
 
     - name: Release
       uses: softprops/action-gh-release@4634c16e79c963813287e889244c50009e7f0981
@@ -539,3 +616,4 @@ jobs:
           Commit: ${{ env.DEVICE_TREE_URL }}/commit/${{ env.COMMIT_ID }}
           MD5: ${{ env.MD5_IMG }}
           Compiler: LLVM/Clang 14
+          Kernel: ${{ env.KERNEL_BUILD_RESULT }}
