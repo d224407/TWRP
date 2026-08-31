@@ -39,6 +39,16 @@ on:
         type: boolean
         required: true
         default: true
+      KERNEL_SOURCE:
+        description: 'Kernel Source (optional) — leave blank to use the device tree default (prebuilt kernel)'
+        required: false
+        default: 'https://github.com/LineageOS/android_kernel_xiaomi_sdm845'
+        type: string
+      KERNEL_BRANCH:
+        description: 'Kernel Source Branch (optional) — leave blank to auto-detect from Manifest Branch, or clone the repo default branch'
+        required: false
+        default: ''
+        type: string
 
 jobs:
   build:
@@ -61,6 +71,8 @@ jobs:
         echo "Device Path: ${{ github.event.inputs.DEVICE_PATH }}"
         echo "Device Name: ${{ github.event.inputs.DEVICE_NAME }}"
         echo "Build Target: ${{ github.event.inputs.BUILD_TARGET }}image"
+        echo "Kernel Source: ${{ github.event.inputs.KERNEL_SOURCE || '(none — use device tree default)' }}"
+        echo "Kernel Branch: ${{ github.event.inputs.KERNEL_BRANCH || '(auto/default)' }}"
 
     - name: Cleanup
       uses: rokibhasansagar/slimhub_actions@main
@@ -104,13 +116,60 @@ jobs:
         chmod a+x ~/bin/repo
         sudo ln -sf ~/bin/repo /usr/bin/repo
 
-    - name: Check Manifest Branch
-      uses: haya14busa/action-cond@master
-      id: manifest
-      with:
-        cond: ${{ github.event.inputs.MANIFEST_BRANCH == 'twrp-11' || github.event.inputs.MANIFEST_BRANCH == 'twrp-12.1' || github.event.inputs.MANIFEST_BRANCH == 'twrp-14.1' }}
-        if_true: https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git
-        if_false: https://github.com/minimal-manifest-twrp/platform_manifest_twrp_omni.git
+    - name: Detect Manifest Branch
+      run: |
+        BRANCH="${{ github.event.inputs.MANIFEST_BRANCH }}"
+        AOSP_URL="https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git"
+        OMNI_URL="https://github.com/minimal-manifest-twrp/platform_manifest_twrp_omni.git"
+        LOS_URL="https://github.com/minimal-manifest-twrp/platform_manifest_twrp_lineageos.git"
+
+        MANIFEST_URL=""
+        MANIFEST_BRANCH_ARG=""
+
+        if [ -z "$BRANCH" ] || [ "$BRANCH" = "automatic" ]; then
+          echo "Automatic mode: using the Omni manifest's default branch"
+          MANIFEST_URL="$OMNI_URL"
+
+        elif [[ "$BRANCH" == "twrp-11" || "$BRANCH" == "twrp-12.1" ]]; then
+          MANIFEST_URL="$AOSP_URL"
+          MANIFEST_BRANCH_ARG="$BRANCH"
+
+        elif [[ "$BRANCH" == "twrp-14.1" ]]; then
+          # twrp-14.1 tracks LineageOS 14.1 (Android 7.1) and lives in its own repo, not the AOSP one
+          MANIFEST_URL="$LOS_URL"
+          MANIFEST_BRANCH_ARG="$BRANCH"
+
+        elif [[ "$BRANCH" =~ ^twrp-[0-9]+(\.[0-9]+)?$ ]]; then
+          # Any other explicit twrp-X.X (e.g. twrp-9.0, twrp-8.1) is an Omni-manifest branch
+          MANIFEST_URL="$OMNI_URL"
+          MANIFEST_BRANCH_ARG="$BRANCH"
+
+        elif [[ "$BRANCH" =~ ^lineage-([0-9]+)(\.[0-9]+)?$ ]]; then
+          LOS_MAJOR="${BASH_REMATCH[1]}"
+          echo "Detected LineageOS-style branch '$BRANCH' (major version $LOS_MAJOR) — mapping to a TWRP manifest..."
+          case "$LOS_MAJOR" in
+            14) MANIFEST_URL="$LOS_URL";  MANIFEST_BRANCH_ARG="twrp-14.1" ;;
+            15) MANIFEST_URL="$OMNI_URL"; MANIFEST_BRANCH_ARG="twrp-8.1" ;;
+            16) MANIFEST_URL="$OMNI_URL"; MANIFEST_BRANCH_ARG="twrp-9.0" ;;
+            17) MANIFEST_URL="$OMNI_URL"; MANIFEST_BRANCH_ARG="twrp-9.0" ;;
+            18) MANIFEST_URL="$AOSP_URL"; MANIFEST_BRANCH_ARG="twrp-11" ;;
+            19) MANIFEST_URL="$AOSP_URL"; MANIFEST_BRANCH_ARG="twrp-12.1" ;;
+            *)
+              echo "::warning::No official TWRP minimal-manifest branch exists yet for LineageOS ${LOS_MAJOR}.x — the project currently tops out at twrp-12.1 (Android 12.1). Falling back to twrp-12.1; the build may need manual device-tree fixes or may not succeed at all on this device generation."
+              MANIFEST_URL="$AOSP_URL"
+              MANIFEST_BRANCH_ARG="twrp-12.1"
+              ;;
+          esac
+
+        else
+          echo "Branch '$BRANCH' doesn't match a known pattern — passing it through to the Omni manifest as-is"
+          MANIFEST_URL="$OMNI_URL"
+          MANIFEST_BRANCH_ARG="$BRANCH"
+        fi
+
+        echo "Resolved manifest: $MANIFEST_URL @ ${MANIFEST_BRANCH_ARG:-<default>}"
+        echo "MANIFEST_URL=$MANIFEST_URL" >> $GITHUB_ENV
+        echo "MANIFEST_BRANCH_ARG=$MANIFEST_BRANCH_ARG" >> $GITHUB_ENV
 
     - name: Initialize Repo
       run: |
@@ -118,14 +177,13 @@ jobs:
         cd workspace
         git config --global user.name "github-actions"
         git config --global user.email "github-actions@github.com"
-        
-        BRANCH="${{ github.event.inputs.MANIFEST_BRANCH }}"
-        if [ "$BRANCH" = "automatic" ] || [ -z "$BRANCH" ]; then
-          echo "Using automatic (default) branch for manifest"
-          repo init --depth=1 -u ${{ steps.manifest.outputs.value }}
+
+        if [ -z "${{ env.MANIFEST_BRANCH_ARG }}" ]; then
+          echo "Using default branch for manifest"
+          repo init --depth=1 -u ${{ env.MANIFEST_URL }}
         else
-          echo "Using branch: $BRANCH"
-          repo init --depth=1 -u ${{ steps.manifest.outputs.value }} -b "$BRANCH"
+          echo "Using branch: ${{ env.MANIFEST_BRANCH_ARG }}"
+          repo init --depth=1 -u ${{ env.MANIFEST_URL }} -b "${{ env.MANIFEST_BRANCH_ARG }}"
         fi
   
     - name: Repo Sync
@@ -144,6 +202,52 @@ jobs:
         
         echo "COMMIT_ID=$(git rev-parse HEAD)" >> $GITHUB_ENV
         echo "Device tree cloned successfully"
+
+    - name: Clone Kernel Source
+      if: github.event.inputs.KERNEL_SOURCE != ''
+      run: |
+        cd workspace
+        KERNEL_SOURCE="${{ github.event.inputs.KERNEL_SOURCE }}"
+        KERNEL_BRANCH="${{ github.event.inputs.KERNEL_BRANCH }}"
+        BOARD_CONFIG="${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk"
+
+        if [ ! -f "$BOARD_CONFIG" ]; then
+          echo "BoardConfig.mk not found, cannot configure kernel source"
+          exit 1
+        fi
+
+        # Reuse whatever kernel path the device tree already declares; otherwise fall back to a sane default
+        KERNEL_PATH=$(grep -oP '(?<=TARGET_KERNEL_SOURCE := ).*' "$BOARD_CONFIG" | head -n1 || true)
+        if [ -z "$KERNEL_PATH" ]; then
+          KERNEL_PATH="kernel/xiaomi/sdm845"
+          echo "TARGET_KERNEL_SOURCE not found in BoardConfig.mk, defaulting kernel path to $KERNEL_PATH"
+        else
+          echo "Using kernel path declared in BoardConfig.mk: $KERNEL_PATH"
+        fi
+        echo "KERNEL_PATH=$KERNEL_PATH" >> $GITHUB_ENV
+
+        # If no branch was given, try to reuse the resolved manifest branch when it looks like a LineageOS version
+        if [ -z "$KERNEL_BRANCH" ] && [[ "${{ github.event.inputs.MANIFEST_BRANCH }}" =~ ^lineage- ]]; then
+          KERNEL_BRANCH="${{ github.event.inputs.MANIFEST_BRANCH }}"
+          echo "No kernel branch specified, reusing manifest branch: $KERNEL_BRANCH"
+        fi
+
+        if [ -z "$KERNEL_BRANCH" ]; then
+          echo "Cloning $KERNEL_SOURCE (default branch) into $KERNEL_PATH"
+          git clone --depth=1 "$KERNEL_SOURCE" "$KERNEL_PATH"
+        else
+          echo "Cloning $KERNEL_SOURCE (branch: $KERNEL_BRANCH) into $KERNEL_PATH"
+          git clone --depth=1 -b "$KERNEL_BRANCH" "$KERNEL_SOURCE" "$KERNEL_PATH" || {
+            echo "::warning::Branch '$KERNEL_BRANCH' not found in $KERNEL_SOURCE, falling back to the repo's default branch"
+            git clone --depth=1 "$KERNEL_SOURCE" "$KERNEL_PATH"
+          }
+        fi
+
+        # Force the device tree to build the kernel from source instead of using a prebuilt binary
+        sed -i '/TARGET_PREBUILT_KERNEL/d' "$BOARD_CONFIG"
+        sed -i '/TARGET_KERNEL_SOURCE/d' "$BOARD_CONFIG"
+        echo "TARGET_KERNEL_SOURCE := $KERNEL_PATH" >> "$BOARD_CONFIG"
+        echo "Kernel source configured for build-from-source"
 
     - name: Fix empty dependencies file
       run: |
@@ -217,7 +321,7 @@ jobs:
         fi
       
     - name: Install Python 2 (Legacy Build Scripts)
-      if: github.event.inputs.MANIFEST_BRANCH != 'twrp-11' && github.event.inputs.MANIFEST_BRANCH != 'twrp-12.1' && github.event.inputs.MANIFEST_BRANCH != 'twrp-14.1'
+      if: env.MANIFEST_BRANCH_ARG != 'twrp-11' && env.MANIFEST_BRANCH_ARG != 'twrp-12.1' && env.MANIFEST_BRANCH_ARG != 'twrp-14.1'
       run: |
         sudo add-apt-repository universe -y
         sudo apt update
@@ -313,7 +417,7 @@ jobs:
         fi
 
     - name: Relax link_type Enforcement (Legacy Branches)
-      if: github.event.inputs.MANIFEST_BRANCH != 'twrp-11' && github.event.inputs.MANIFEST_BRANCH != 'twrp-12.1' && github.event.inputs.MANIFEST_BRANCH != 'twrp-14.1'
+      if: env.MANIFEST_BRANCH_ARG != 'twrp-11' && env.MANIFEST_BRANCH_ARG != 'twrp-12.1' && env.MANIFEST_BRANCH_ARG != 'twrp-14.1'
       run: |
         cd workspace
         for f in build/core/link_type.mk build/make/core/link_type.mk; do
@@ -419,13 +523,13 @@ jobs:
           MD5: ${{ env.MD5_IMG }}
           Compiler: LLVM/Clang 14
 
-    - name: Release Ramdisk
+    - name: Release
       uses: softprops/action-gh-release@4634c16e79c963813287e889244c50009e7f0981
       with:
         files: |
           workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/obj/PACKAGING/vendor_ramdisk_fragments_intermediates/recovery.*
           workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/ramdisk-recovery.*
-        name: TWRP Ramdisk for ${{ github.event.inputs.DEVICE_NAME }} - ${{ env.BUILD_DATE }}
+        name: TWRP for ${{ github.event.inputs.DEVICE_NAME }} - ${{ env.BUILD_DATE }}
         tag_name: ${{ github.run_id }}
         body: |
           Device: ${{ github.event.inputs.DEVICE_NAME }}
