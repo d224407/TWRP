@@ -298,6 +298,21 @@ jobs:
           exit 0
         fi
 
+        # Fix known link errors on this class of kernel tree:
+        # 1) techpack audio drivers are built-in but CONFIG_SND_SOC (ASoC core)
+        #    isn't, so vmlinux can't find snd_soc_info_volsw/etc. Force it built-in.
+        # 2) The arm64 EFI stub build fails to link (__efistub_strrchr) on this
+        #    toolchain/tree combo. Recovery doesn't boot via EFI stub, so disable it
+        #    instead of trying to patch in a wrapper.
+        if [ -x scripts/config ]; then
+          echo "Fixing known defconfig link issues (ASoC core, EFI stub)..."
+          ./scripts/config --file out/.config --enable CONFIG_SND_SOC || true
+          ./scripts/config --file out/.config --disable CONFIG_EFI_STUB --disable CONFIG_EFI || true
+          make O=out $IGNORE_WARNINGS olddefconfig
+        else
+          echo "::warning::scripts/config not found in this kernel tree, skipping automatic ASoC/EFI-stub fixups"
+        fi
+
         make O=out $IGNORE_WARNINGS -j$(nproc --all) 2>&1 | tee /tmp/kernel_build.log
         BUILD_STATUS=${PIPESTATUS[0]}
         if [ "$BUILD_STATUS" -ne 0 ]; then
