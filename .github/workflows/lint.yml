@@ -1,0 +1,26 @@
+name: Lint Workflows
+
+on:
+  push:
+    paths:
+      - '.github/workflows/*.yml'
+      - '.github/workflows/*.yaml'
+  pull_request:
+    paths:
+      - '.github/workflows/*.yml'
+      - '.github/workflows/*.yaml'
+  workflow_dispatch:
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check Out
+        uses: actions/checkout@main
+
+      - name: Run actionlint
+        uses: reviewdog/action-actionlint@main
+        with:
+          fail_level: none
+          
